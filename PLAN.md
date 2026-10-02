@@ -152,7 +152,7 @@ the server, and goroutine safety. Callbacks run one at a time, in order, on a di
 the same as callbacks on mosquitto's loop thread. The dispatcher goroutine exists only while
 callbacks are queued.
 
-### Implemented (phase 1)
+### Implemented (phases 1 and 2)
 
 ```go
 func New(opts Options, h Handlers) (*Client, error)               // mosquitto_new + option setters
@@ -162,6 +162,24 @@ func (c *Client) SetCredentials(username string, password []byte) error         
 func (c *Client) SetWill(w *Message) error                                            // will_set_v5; nil = will_clear
 func (c *Client) ClientID() string                                                    // includes a server-assigned id
 func (c *Client) IsConnected() bool
+func (c *Client) Publish(ctx context.Context, m *Message) (*Pending, error)          // mosquitto_publish_v5 (phase 2)
+
+type Pending struct{ Mid uint16 /* … */ }
+func (p *Pending) Wait(ctx context.Context) (Result, error) // *ReasonCodeError for reason >= 0x80; ctx does not cancel the message
+func (p *Pending) Done() <-chan struct{}
+type Result struct {
+    ReasonCode byte        // final acknowledgement (MQTT 5); 0 for QoS 0
+    Properties *Properties
+}
+
+type Message struct {
+    Topic      string
+    Payload    []byte
+    QoS        byte
+    Retain     bool
+    Properties *Properties // MQTT 5
+    Mid        uint16      // set on received QoS 1/2 messages
+}
 
 type Options struct {
     Server            string        // one URL: mqtt:// tcp:// (1883), mqtts:// ssl:// tls:// (8883)
@@ -174,7 +192,7 @@ type Options struct {
     Will              *Message
     ConnectProperties *Properties   // MQTT 5
     ReceiveMaximum    uint16        // default 20; always sent in MQTT 5 CONNECT, as mosquitto does
-    MaxInflight       uint16        // default 20 (used from phase 2)
+    MaxInflight       uint16        // default 20; outbound QoS 1/2 in flight unless the server sends Receive Maximum
     TLSConfig         *tls.Config
     Logger            *slog.Logger
 }
@@ -183,6 +201,8 @@ type Handlers struct {
     OnPreConnect func(c *Client)                     // synchronous, before dialling
     OnConnect    func(c *Client, ack ConnAck)        // every CONNACK, accepted or refused
     OnDisconnect func(c *Client, ev DisconnectEvent) // once per established connection
+    OnMessage    func(c *Client, m *Message)         // QoS 0/1 on arrival (after PUBACK), QoS 2 on PUBREL (after PUBCOMP)
+    OnPublish    func(c *Client, mid uint16, reason byte, props *Properties) // QoS 0 written, PUBACK, PUBCOMP, or failed PUBREC
 }
 
 type DisconnectEvent struct {
@@ -195,22 +215,26 @@ type DisconnectEvent struct {
 
 `Server` is a single URL rather than a list: mosquitto connects to one host, and so does swarmy.
 
+Publish follows `mosquitto_publish_v5`. Every message takes a mid, QoS 0 included. Argument
+errors (`ErrInvalid`), a QoS above the server's Maximum QoS (`ErrQoSNotSupported`) and a packet
+over the server's Maximum Packet Size (`ErrOversizePacket`) are returned before a mid is taken.
+Retain is silently cleared when the server does not support it. A QoS 0 message needs a
+connection (`ErrNoConn`). QoS 1 and 2 messages are queued and sent while the send quota allows
+(the server's Receive Maximum, else `MaxInflight`). They are kept across connections until
+acknowledged, so a message published while disconnected goes out after the next `Connect`.
+
 ### Still to come
 
 ```go
 // Handlers additions
-OnMessage     func(c *Client, m *Message)                                  // phase 2
-OnPublish     func(c *Client, mid uint16, reason byte, props *Properties)  // phase 2
 OnSubscribe   func(c *Client, mid uint16, granted []byte, props *Properties) // phase 3
 OnUnsubscribe func(c *Client, mid uint16, reasons []byte, props *Properties) // phase 3
 
-func (c *Client) Publish(ctx context.Context, m *Message) (*Pending, error)                              // phase 2
 func (c *Client) Subscribe(ctx context.Context, subs []Subscription, props *Properties) (*Pending, error) // phase 3
 func (c *Client) Unsubscribe(ctx context.Context, topics []string, props *Properties) (*Pending, error)   // phase 3
 func (c *Client) Start(ctx context.Context) error   // phase 4: connect_async + loop_forever semantics (reconnect)
 
-type Pending struct{ Mid uint16 /* … */ }
-func (p *Pending) Wait(ctx context.Context) (Result, error)
+// Result additions (phase 3): granted QoS / reason codes per topic for SUBACK and UNSUBACK
 
 // Options additions (phase 4): ReconnectDelay, ReconnectDelayMax, ReconnectExponential
 ```
@@ -229,21 +253,28 @@ func (p *Pending) Wait(ctx context.Context) (Result, error)
             supervisor goroutine: dial → CONNECT/CONNACK → run → on error back off → redial
 ```
 
-Planned files at the repository root:
+Files at the repository root (✓ = exists):
 
-- `client.go`: `Client`, `New`, `Start`, `Connect`, `Disconnect`, and the supervisor loop
-- `options.go`: `Options`, defaults, validation
-- `dial.go`: URL scheme → `net.Conn` (tcp, tls), connect timeout
-- `wire.go`: `readPacket` / `writePacket` around comqtt (ported from comqtt
-  `mqtt/clients.go` `ReadFixedHeader`/`ReadPacket`/`WritePacket`), packet builders, and the fixes
-  for codec gaps 2–9
-- `session.go`: mid allocator (skip mids in use, wrap at 65535), outbound and inbound inflight
-  maps, receive-maximum semaphore, and the resend-on-reconnect state (`messages_mosq.c`)
-- `handle.go`: one handler per inbound packet type (the `handle_*.c` equivalents), including
-  protocol-error paths such as an unexpected PUBACK, PUBREL or PUBCOMP
-- `keepalive.go`: PINGREQ on idle and a PINGRESP timeout, which counts as a connection loss
-- `topic.go`: publish and subscribe topic checks (port of libcommon topic)
-- `errors.go`: typed errors, plus reason-code text from comqtt `codes.go`
+- ✓ `client.go`: `Client`, `New`, `Connect`, `Disconnect`, dialling (tcp, tls); later `Start` and
+  the supervisor loop
+- ✓ `options.go`: `Options`, `Handlers`, `Message`, defaults, validation, topic checks
+- ✓ `conn.go`: one network connection: reader goroutine, keepalive (PINGREQ on idle, PINGRESP
+  timeout), CONNACK and DISCONNECT handling, teardown
+- ✓ `wire.go`: `readPacket` around comqtt (ported from comqtt `mqtt/clients.go`
+  `ReadFixedHeader`/`ReadPacket`), packet builders, and the fixes for codec gaps 2–9
+- ✓ `session.go`: mid allocator (skip mids in use, wrap at 65535), the ordered outbound queue
+  with its send quota, the inbound QoS 2 store and receive quota, and the per-connection
+  reset and resend (`messages_mosq.c`). The session lives on the `Client`, so it outlives each
+  connection.
+- ✓ `publish.go`: `Publish`, `Pending`, argument and size checks (`actions_publish.c`)
+- ✓ `handle.go`: PUBLISH, PUBACK, PUBREC, PUBREL and PUBCOMP handlers (the `handle_*.c`
+  equivalents), including unexpected acknowledgements
+- ✓ `dispatch.go`: the callback dispatcher
+- ✓ `errors.go`: typed errors and reason-code text
+
+Every write has a deadline: the caller's ctx, or else one keepalive period. A stalled socket then
+closes the connection instead of blocking the reader or keepalive goroutine. Packets are written
+while holding the session lock, so messages leave in mid order.
 
 Behaviour follows mosquitto (decision 3). Where mosquitto and paho differ, mosquitto wins:
 
@@ -259,12 +290,16 @@ Behaviour follows mosquitto (decision 3). Where mosquitto and paho differ, mosqu
     Session Present.
   - Their state is rewound: a QoS 1 or QoS 2 PUBLISH waiting for an ack goes back to "publish",
     and a QoS 2 message waiting for PUBCOMP goes back to "resend PUBREL".
-  - After a successful CONNACK, everything inflight is resent in order with DUP=1: PUBLISH,
-    PUBREC for inbound messages awaiting PUBREL, and PUBREL.
+  - After a successful CONNACK, and before `OnConnect` runs, outbound messages are sent again in
+    order, up to the quota: PUBLISH with DUP=1 (DUP=0 if it was never sent) and PUBREL. PUBREC
+    is not resent for inbound messages. Neither mosquitto nor the spec does this: the server
+    resends its PUBLISH or PUBREL.
   - Messages beyond the inflight quota stay queued.
-  - Inbound: inflight messages that aren't QoS 2 are dropped. Inbound QoS 2 messages awaiting
-    PUBREL are kept.
+  - Inbound: QoS 2 messages awaiting PUBREL are kept when CONNACK reports Session Present and
+    dropped otherwise (see Deviations).
   - The inflight quota is reset to the server's Receive Maximum.
+  - **Done in phase 2** for an explicit `Connect` after a lost connection. Phase 4's supervisor
+    reuses it.
 - **Retry on the same connection:** none. In mosquitto 2.x, `mosquitto_message_retry_set` does
   nothing (`messages_mosq.c:328`), and resends happen only after a CONNACK.
 - **v5 topic alias:** send `TopicAliasMaximum = 0` so the broker never sends us aliases. Outbound
@@ -317,9 +352,9 @@ the UI.
 |---|---|---|
 | 0 | **Done.** Repository, LICENSE, README; comqtt gap #1 fixed on branch `BB-724` (`5268a06`, not yet merged to main); `go.upstream.mod`; CI workflow (tests with both modfiles, mosquitto conformance) | `go vet`, `go test -race` pass with both modfiles |
 | 1 | **Done.** Dial (tcp, tls), CONNECT/CONNACK, keepalive, PINGREQ/PINGRESP both ways, DISCONNECT both ways, protocol-error DISCONNECT, v3.1, v3.1.1 and v5 | all 12 non-auth `01-*` conformance cases pass; unit tests with a scripted broker pass 20× under `-race` |
-| 2 | PUBLISH out and in at QoS 0/1/2, mid allocator, inflight, receive maximum, max packet size | `03-*` and `11-*` pass |
-| 3 | SUBSCRIBE and UNSUBSCRIBE (multiple, v5 options and properties), `Pending.Wait` | `02-*` pass |
-| 4 | Supervisor: reconnect backoff, session resumption, `OnConnect` re-subscribe pattern | `01-no-clean-session`, `03-*-disconnect` pass; integration tests that kill the broker pass |
+| 2 | **Done.** PUBLISH out and in at QoS 0/1/2, mid allocator, inflight queue, receive maximum both ways, max packet size, resend after reconnect, `Pending.Wait`; `cmd/mqttpub` test tool | 19 of the 22 `03-*` scripts and all 6 `11-*` scripts pass (37 conformance cases in total; `11-prop-oversize-packet` with an override); the other three `03-*` scripts subscribe, so they move to phase 3; unit tests pass 20× under `-race` |
+| 3 | SUBSCRIBE and UNSUBSCRIBE (multiple, v5 options and properties), `Pending` for SUBACK/UNSUBACK, the SUBSCRIBE/UNSUBSCRIBE size checks of `11-prop-oversize-packet` | `02-*`, `03-publish-loop`, `03-request-response*` pass |
+| 4 | Supervisor: reconnect backoff, session resumption, `OnConnect` re-subscribe pattern | `01-no-clean-session` and `03-*-disconnect` still pass with the supervisor instead of the ports' manual `Connect`; integration tests that kill the broker pass |
 | 5 | **Swap swarmy over:** add the `require` and the comqtt `replace` (see Module wiring), replace autopaho in `main.go`, add `ProtocolVersion` to `ConnectionItem` and the UI, remove paho from `go.mod` and run `go mod tidy` | parity checklist done; manual run against mosquitto and comqtt brokers; tag `v0.1.0` |
 | 6 | **Broker adoption:** reimplement `libs/mqtt-client`'s `MQTTClient` interface (V3 and V5) on this module, then move `tests/broker-throughput`, `tests/functional` and `tests/sparkplug-client` over | those test tools run unchanged; paho removed from `libs/mqtt-client` |
 | 7 (optional) | Outbound topic alias, extended AUTH (`01-extended-auth-*`), persistent inflight store | as needed |
@@ -337,7 +372,12 @@ almost all of it in `connectOne`, `buildConnConfig`, `onConnectionUp`, `onPublis
 | 3.x CONNACK to an MQTT 5 CONNECT | `on_connect(0x84)`, then protocol error | `OnConnect(0x84)`, `*ConnRefusedError{0x84}` | Same report, clearer error type. |
 | `mosquitto_connect` | returns after sending CONNECT; CONNACK arrives in the loop | `Connect` waits for CONNACK (or ctx) | Go callers want the result; OnConnect still fires. |
 | Retain Available reset | reset to "available" by `mosquitto_connect`, kept across `mosquitto_reconnect` | reset by every `Connect` | Matches mosquitto for explicit connects; phase 4's reconnect loop must keep the server's last value. |
-| Inbound QoS 2 duplicate (phase 2) | queues a second copy under the same mid | will replace the stored copy | See Internal design. |
+| Maximum QoS, Maximum Packet Size, Receive Maximum from CONNACK | kept from an earlier CONNACK when absent | reset to the defaults (2, none, `MaxInflight`) on every CONNACK | The values describe the current connection. |
+| Inbound QoS 2 duplicate | queues a second copy under the same mid | replaces the stored copy | See Internal design. |
+| Maximum Packet Size check | leaves out the fixed header byte (`packet__check_oversize`), so it sends packets 1 byte over the limit | counts the whole packet (MQTT 5 §3.2.2.3.6) | A strict server would disconnect us. `conformance/overrides/11-prop-oversize-packet.py` shortens both payloads by one byte. |
+| DUP after reconnect | set on every message released after a reconnect, even ones never sent | set only on messages sent before | [MQTT-3.3.1-1]: DUP marks a re-delivery. |
+| Inbound QoS 2 store when CONNACK Session Present = 0 | kept; each one still uses up receive quota | dropped | Their PUBREL can never come. With mosquitto, the stale entries use up Receive Maximum. |
+| Too many inbound QoS 1/2 messages (MQTT 5) | protocol error, so DISCONNECT 0x82 | DISCONNECT 0x93 (Receive Maximum exceeded) | The spec's reason code; mosquitto has a FIXME for it. |
 
 ## Risks
 

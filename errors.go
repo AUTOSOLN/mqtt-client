@@ -19,7 +19,34 @@ var (
 	ErrOversizePacket   = errors.New("mqttclient: packet exceeds maximum packet size") // MOSQ_ERR_OVERSIZE_PACKET
 	ErrServerDisconnect = errors.New("mqttclient: server sent DISCONNECT")
 	ErrDisconnected     = errors.New("mqttclient: disconnected by the application")
+	ErrQoSNotSupported  = errors.New("mqttclient: qos not supported by the server") // MOSQ_ERR_QOS_NOT_SUPPORTED
+	ErrNoMid            = errors.New("mqttclient: all message ids are in use")
 )
+
+// ReasonCodeError is returned by Pending.Wait when the server answers with an
+// MQTT 5 failure reason code (0x80 or above).
+type ReasonCodeError struct {
+	Packet     string // the acknowledgement, for example "PUBACK"
+	ReasonCode byte
+}
+
+func (e *ReasonCodeError) Error() string {
+	return fmt.Sprintf("mqttclient: %s: %s (0x%02x)", e.Packet, ReasonCodeString(e.ReasonCode), e.ReasonCode)
+}
+
+// disconnectError is a protocol violation that MQTT 5 reports to the server
+// with a specific DISCONNECT reason code.
+type disconnectError struct {
+	reason byte
+	err    error
+}
+
+func (e *disconnectError) Error() string { return e.err.Error() }
+func (e *disconnectError) Unwrap() error { return e.err }
+
+func protocolError(reason byte, format string, args ...any) error {
+	return &disconnectError{reason: reason, err: fmt.Errorf("%w: %s", ErrProtocol, fmt.Sprintf(format, args...))}
+}
 
 // ConnRefusedError is returned by Connect, and reported to OnDisconnect, when
 // the server answers CONNECT with a non-zero CONNACK return/reason code.
@@ -111,9 +138,14 @@ var reasonCodes = map[byte]string{
 	0xA2: "wildcard subscriptions not supported",
 }
 
-// Reason codes the client itself sends in DISCONNECT (MQTT 5).
+// MQTT 5 reason codes the client itself sends in DISCONNECT, and that it
+// checks for in acknowledgements.
 const (
-	reasonNormalDisconnection = 0x00
-	reasonMalformedPacket     = 0x81
-	reasonProtocolError       = 0x82
+	reasonNormalDisconnection    = 0x00
+	reasonMalformedPacket        = 0x81
+	reasonProtocolError          = 0x82
+	reasonPacketIDNotFound       = 0x92
+	reasonReceiveMaximumExceeded = 0x93
+	reasonTopicAliasInvalid      = 0x94
+	reasonPacketTooLarge         = 0x95
 )

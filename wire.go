@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/wind-c/comqtt/v2/mqtt/packets"
 )
@@ -91,14 +92,13 @@ func decodeBody(pk *packets.Packet, buf []byte) error {
 		}
 	case packets.Publish:
 		err = pk.PublishDecode(buf)
-	case packets.Puback:
+	case packets.Puback, packets.Pubrec, packets.Pubrel, packets.Pubcomp:
+		// The four acknowledgements share one layout; MQTT 3.x has only
+		// the packet identifier.
+		if pk.ProtocolVersion < MQTT5 && len(buf) != 2 {
+			return fmt.Errorf("%w: %s remaining length %d", ErrMalformedPacket, packets.PacketNames[pk.FixedHeader.Type], len(buf))
+		}
 		err = pk.PubackDecode(buf)
-	case packets.Pubrec:
-		err = pk.PubrecDecode(buf)
-	case packets.Pubrel:
-		err = pk.PubrelDecode(buf)
-	case packets.Pubcomp:
-		err = pk.PubcompDecode(buf)
 	case packets.Suback:
 		err = pk.SubackDecode(buf)
 	case packets.Unsuback:
@@ -182,7 +182,7 @@ func hasProperties(pkt byte, p *Properties) bool {
 
 func packetName(t byte) string {
 	if s, ok := packets.PacketNames[t]; ok {
-		return s
+		return strings.ToUpper(s)
 	}
 	return fmt.Sprintf("type %d", t)
 }
@@ -232,6 +232,9 @@ func newConnect(p connectParams) packets.Packet {
 			pk.Connect.WillProperties = *w.Properties
 		}
 	}
+	if pk.Connect.WillFlag && p.version == MQTT5 {
+		setPropertyFlags(&pk.Connect.WillProperties)
+	}
 	if p.version == MQTT5 {
 		if p.properties != nil {
 			pk.Properties = *p.properties
@@ -254,6 +257,48 @@ func newDisconnect(version, reason byte, props *Properties) packets.Packet {
 		pk.Properties = *props
 	}
 	return pk
+}
+
+// newPublish builds a PUBLISH for m; m.Mid is the packet identifier when
+// m.QoS > 0. dup marks a resend.
+func newPublish(version byte, m *Message, dup bool) packets.Packet {
+	pk := packets.Packet{
+		FixedHeader:     packets.FixedHeader{Type: packets.Publish, Qos: m.QoS, Retain: m.Retain, Dup: dup && m.QoS > 0},
+		ProtocolVersion: version,
+		TopicName:       m.Topic,
+		Payload:         m.Payload,
+		PacketID:        m.Mid,
+	}
+	if version == MQTT5 && m.Properties != nil {
+		pk.Properties = *m.Properties
+		setPropertyFlags(&pk.Properties)
+	}
+	return pk
+}
+
+// newAck builds a PUBACK, PUBREC, PUBREL or PUBCOMP. The codec writes the
+// short form (packet identifier only) unless the reason code is a failure,
+// as libmosquitto's send__command_with_mid does for reason code 0.
+func newAck(version, typ byte, mid uint16, reason byte) packets.Packet {
+	pk := packets.Packet{
+		FixedHeader:     packets.FixedHeader{Type: typ},
+		ProtocolVersion: version,
+		PacketID:        mid,
+		ReasonCode:      reason,
+	}
+	if typ == packets.Pubrel {
+		pk.FixedHeader.Qos = 1 // fixed header flags 0010 [MQTT-3.6.1-1]
+	}
+	return pk
+}
+
+// setPropertyFlags sets the codec's presence flags for values the caller
+// set without them (codec gap 6). Payload Format Indicator 0 is the default,
+// so leaving it out does not change its meaning.
+func setPropertyFlags(p *Properties) {
+	if p.PayloadFormat != 0 {
+		p.PayloadFormatFlag = true
+	}
 }
 
 func newPingreq(version byte) packets.Packet {

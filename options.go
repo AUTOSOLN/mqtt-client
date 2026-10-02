@@ -42,6 +42,10 @@ type Message struct {
 	QoS        byte
 	Retain     bool
 	Properties *Properties // MQTT 5 only
+
+	// Mid is the packet identifier of a received QoS 1 or 2 message. It is
+	// ignored by Publish and SetWill.
+	Mid uint16
 }
 
 // Options configures a Client. Server is the only required field.
@@ -83,8 +87,9 @@ type Options struct {
 	ReceiveMaximum uint16
 
 	// MaxInflight bounds outbound QoS 1/2 messages awaiting acknowledgement
-	// (mosquitto_max_inflight_messages_set). With MQTT 5 the server's Receive
-	// Maximum applies instead. Zero means DefaultMaxInflight.
+	// (mosquitto_max_inflight_messages_set). When an MQTT 5 server sends
+	// Receive Maximum in CONNACK, that applies instead for the connection.
+	// Messages beyond the limit are queued. Zero means DefaultMaxInflight.
 	MaxInflight uint16
 
 	// TLSConfig is used for mqtts/ssl/tls servers. If nil, a default
@@ -113,6 +118,17 @@ type Handlers struct {
 	// OnDisconnect is called once for every network connection that was
 	// established, after it has closed.
 	OnDisconnect func(c *Client, ev DisconnectEvent)
+
+	// OnMessage is called for every message received from the server: QoS 0
+	// and 1 on arrival (after PUBACK is sent), QoS 2 when PUBREL arrives
+	// (after PUBCOMP is sent). The handler owns m.
+	OnMessage func(c *Client, m *Message)
+
+	// OnPublish is called when a published message is complete: QoS 0 once
+	// written to the network, QoS 1 on PUBACK, QoS 2 on PUBCOMP, or on a
+	// PUBREC with a failure reason code (MQTT 5). reason and props are the
+	// acknowledgement's reason code and properties.
+	OnPublish func(c *Client, mid uint16, reason byte, props *Properties)
 }
 
 // ConnAck describes a received CONNACK.

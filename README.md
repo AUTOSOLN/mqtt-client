@@ -4,8 +4,9 @@ An MQTT 3.1.1 / 5.0 client for Go, modelled on the
 [libmosquitto](https://github.com/eclipse-mosquitto/mosquitto) client API and
 built on the [comqtt](https://github.com/AUTOSOLN/comqtt) packet codec.
 
-Status: pre-alpha. Connect, keepalive and disconnect work for MQTT 3.1, 3.1.1
-and 5 over TCP and TLS; publish and subscribe are next. See [PLAN.md](PLAN.md).
+Status: pre-alpha. Connect, keepalive, disconnect and publish (QoS 0, 1 and 2,
+both directions) work for MQTT 3.1, 3.1.1 and 5 over TCP and TLS; subscribe is
+next. See [PLAN.md](PLAN.md).
 
 ```go
 c, err := mqttclient.New(mqttclient.Options{
@@ -18,6 +19,9 @@ c, err := mqttclient.New(mqttclient.Options{
 	OnDisconnect: func(_ *mqttclient.Client, ev mqttclient.DisconnectEvent) {
 		log.Println("disconnected:", ev.Err)
 	},
+	OnMessage: func(_ *mqttclient.Client, m *mqttclient.Message) {
+		log.Printf("%s: %s", m.Topic, m.Payload)
+	},
 })
 if err != nil {
 	log.Fatal(err)
@@ -26,6 +30,14 @@ if _, err := c.Connect(ctx); err != nil {
 	log.Fatal(err)
 }
 defer c.Disconnect(ctx, 0, nil)
+
+p, err := c.Publish(ctx, &mqttclient.Message{Topic: "a/b", Payload: []byte("hi"), QoS: 1})
+if err != nil {
+	log.Fatal(err)
+}
+if _, err := p.Wait(ctx); err != nil { // PUBACK received, or refused
+	log.Fatal(err)
+}
 ```
 
 ## Testing
@@ -35,6 +47,10 @@ go test -race ./...
 ./conformance/run.sh      # libmosquitto's client test suite; needs python3 and
                           # a mosquitto checkout (MOSQUITTO_SRC, default ../mosquitto)
 ```
+
+For manual tests against a real broker, see [cmd/mqttconnect](cmd/mqttconnect)
+(connect and disconnect) and [cmd/mqttpub](cmd/mqttpub) (publish, and receive
+through a persistent session).
 
 ## Using it
 

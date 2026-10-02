@@ -21,6 +21,7 @@ type conn struct {
 	nc      net.Conn
 	br      *bufio.Reader
 	wmu     sync.Mutex
+	maxIn   uint32 // Maximum Packet Size sent in CONNECT; 0 means no limit
 
 	started        atomic.Bool
 	active         atomic.Bool // CONNACK accepted (mosq_cs_active)
@@ -108,8 +109,10 @@ func (cn *conn) connectErr() error {
 	return cn.cause
 }
 
-// write encodes and sends pk. A zero deadline means no write deadline. A
-// network error closes the connection.
+// write encodes and sends pk. A zero deadline means one keepalive period
+// from now, or none when keepalive is off: a write that cannot finish in
+// that time means the connection is dead, and it must not block the reader
+// or keepalive goroutines for longer. A network error closes the connection.
 func (cn *conn) write(pk *packets.Packet, deadline time.Time) error {
 	if cn.isClosed() {
 		return ErrNoConn
@@ -117,6 +120,9 @@ func (cn *conn) write(pk *packets.Packet, deadline time.Time) error {
 	b, err := encodePacket(pk)
 	if err != nil {
 		return err
+	}
+	if ka := time.Duration(cn.keepalive.Load()); deadline.IsZero() && ka > 0 {
+		deadline = time.Now().Add(ka)
 	}
 	cn.wmu.Lock()
 	defer cn.wmu.Unlock()
@@ -147,7 +153,7 @@ func (cn *conn) sendDisconnectReason(reason byte) {
 func (cn *conn) readLoop() {
 	defer cn.finish()
 	for {
-		pk, err := readPacket(cn.br, cn.version, 0)
+		pk, err := readPacket(cn.br, cn.version, cn.maxIn)
 		if err != nil {
 			cn.fail(err)
 			return
@@ -167,13 +173,22 @@ func (cn *conn) fail(err error) {
 		return
 	}
 	var refused *ConnRefusedError
+	var de *disconnectError
 	switch {
 	case errors.As(err, &refused), errors.Is(err, ErrServerDisconnect):
+	case errors.As(err, &de):
+		if cn.version == MQTT5 {
+			cn.sendDisconnectReason(de.reason)
+		}
+	case errors.Is(err, ErrOversizePacket):
+		if cn.version == MQTT5 {
+			cn.sendDisconnectReason(reasonPacketTooLarge)
+		}
 	case errors.Is(err, ErrProtocol):
 		if cn.version == MQTT5 {
 			cn.sendDisconnectReason(reasonProtocolError)
 		}
-	case errors.Is(err, ErrMalformedPacket), errors.Is(err, ErrOversizePacket):
+	case errors.Is(err, ErrMalformedPacket):
 		if cn.version == MQTT5 {
 			cn.sendDisconnectReason(reasonMalformedPacket)
 		}
@@ -193,6 +208,7 @@ func (cn *conn) finish() {
 	<-cn.kaDone
 
 	c := cn.c
+	c.sess.disconnected(cn)
 	c.mu.Lock()
 	if c.cn == cn {
 		c.cn = nil
@@ -226,6 +242,16 @@ func (cn *conn) handle(pk *packets.Packet) error {
 		return nil
 	case packets.Disconnect:
 		return cn.handleDisconnect(pk)
+	case packets.Publish:
+		return cn.handlePublish(pk)
+	case packets.Puback:
+		return cn.handlePuback(pk)
+	case packets.Pubrec:
+		return cn.handlePubrec(pk)
+	case packets.Pubrel:
+		return cn.handlePubrel(pk)
+	case packets.Pubcomp:
+		return cn.handlePubcomp(pk)
 	default:
 		return fmt.Errorf("%w: %s is not handled yet", ErrProtocol, packetName(t))
 	}
@@ -283,12 +309,26 @@ func (cn *conn) handleConnack(pk *packets.Packet) error {
 	if ack.ReasonCode != 0 {
 		return cn.connackRefused(ack)
 	}
+	// Resend what was in flight before OnConnect runs, so that messages
+	// keep their order.
+	if err := c.sess.connected(cn, cn.sendMaximum(ack.Properties), ack.Properties, ack.SessionPresent); err != nil {
+		return err
+	}
 	if h := c.h.OnConnect; h != nil {
 		c.disp.post(func() { h(c, ack) })
 	}
-	cn.active.Store(true)
 	cn.connack <- connackResult{ack: ack}
 	return nil
+}
+
+// sendMaximum is the number of QoS 1/2 messages that may be in flight to the
+// server: its Receive Maximum when it sends one, otherwise MaxInflight (as
+// libmosquitto keeps msgs_out.inflight_maximum).
+func (cn *conn) sendMaximum(props *Properties) uint16 {
+	if props != nil && props.ReceiveMaximum > 0 {
+		return props.ReceiveMaximum
+	}
+	return cn.c.opts.MaxInflight
 }
 
 func (cn *conn) connackRefused(ack ConnAck) error {

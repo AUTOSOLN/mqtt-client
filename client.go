@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+
+	"github.com/wind-c/comqtt/v2/mqtt/packets"
 )
 
 // Client is an MQTT client connection to a single server. It is safe for
@@ -17,6 +19,7 @@ type Client struct {
 	srv  server
 	log  *slog.Logger
 	disp dispatcher
+	sess session
 
 	mu              sync.Mutex
 	cn              *conn // current network connection, nil when disconnected
@@ -53,6 +56,7 @@ func New(opts Options, h Handlers) (*Client, error) {
 		password: opts.Password,
 		will:     copyMessage(opts.Will),
 	}
+	c.sess.init()
 	return c, nil
 }
 
@@ -140,6 +144,12 @@ func (c *Client) Connect(ctx context.Context) (ConnAck, error) {
 		receiveMaximum:  c.opts.ReceiveMaximum,
 	})
 	c.mu.Unlock()
+	if p := connectProperties(&pk); p != nil {
+		cn.maxIn = p.MaximumPacketSize
+		c.sess.mu.Lock()
+		c.sess.recvMax = p.ReceiveMaximum
+		c.sess.mu.Unlock()
+	}
 
 	cn.start(nc)
 	if cn.userDisconnect.Load() {
@@ -228,4 +238,12 @@ func copyMessage(m *Message) *Message {
 	}
 	cp := *m
 	return &cp
+}
+
+// connectProperties returns the properties of an MQTT 5 CONNECT, or nil for MQTT 3.x.
+func connectProperties(pk *packets.Packet) *Properties {
+	if pk.ProtocolVersion != MQTT5 {
+		return nil
+	}
+	return &pk.Properties
 }

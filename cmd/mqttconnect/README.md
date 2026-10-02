@@ -33,6 +33,7 @@ go build -o build/mqttconnect ./cmd/mqttconnect
 | `-v` | `311` | Protocol version: `31`, `311` or `5` |
 | `-id` | empty | Client id. An empty id needs `-clean`. MQTT 3.1 then gets a random `mosq-…` id; MQTT 5 uses the id the broker assigns. |
 | `-clean` | `true` | Clean session (3.x) or clean start (5) |
+| `-session-expiry` | `0` | Session Expiry Interval in seconds (needs `-v 5`) |
 | `-keepalive` | `60` | Seconds; 0 or at least 5 |
 | `-u`, `-P` | empty | Username and password |
 | `-hold` | `0` | How long to stay connected after CONNACK. Ctrl-C ends it early. |

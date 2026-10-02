@@ -5,7 +5,9 @@
 //
 // It is a multi-call binary: run.sh links it as c/<name>.test and
 // cpp/<name>.test, and the case is chosen from the program name. The first
-// argument is the port to connect to.
+// argument is the port to connect to. "-list" prints the programs and
+// "-scripts" the test scripts they cover; most scripts share their
+// program's name, the rest are listed in scripts.
 package main
 
 import (
@@ -148,6 +150,12 @@ func main() {
 	if len(os.Args) == 2 && os.Args[1] == "-list" {
 		for n := range cases {
 			fmt.Println(n)
+		}
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "-scripts" {
+		for _, s := range scriptNames() {
+			fmt.Println(s)
 		}
 		return
 	}
