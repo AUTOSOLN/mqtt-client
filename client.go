@@ -1,0 +1,231 @@
+package mqttclient
+
+import (
+	"context"
+	"crypto/tls"
+	"fmt"
+	"log/slog"
+	"net"
+	"sync"
+)
+
+// Client is an MQTT client connection to a single server. It is safe for
+// concurrent use.
+type Client struct {
+	opts Options
+	h    Handlers
+	srv  server
+	log  *slog.Logger
+	disp dispatcher
+
+	mu              sync.Mutex
+	cn              *conn // current network connection, nil when disconnected
+	clientID        string
+	username        string
+	password        []byte
+	will            *Message
+	retainAvailable bool
+}
+
+// New validates opts and returns a disconnected client (mosquitto_new).
+func New(opts Options, h Handlers) (*Client, error) {
+	if err := opts.validate(); err != nil {
+		return nil, err
+	}
+	srv, err := parseServer(opts.Server)
+	if err != nil {
+		return nil, err
+	}
+	if opts.TLSConfig != nil && !srv.useTLS {
+		return nil, fmt.Errorf("%w: TLSConfig set for non-TLS server %q", ErrInvalid, opts.Server)
+	}
+	log := opts.Logger
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	c := &Client{
+		opts:     opts,
+		h:        h,
+		srv:      srv,
+		log:      log,
+		clientID: opts.ClientID,
+		username: opts.Username,
+		password: opts.Password,
+		will:     copyMessage(opts.Will),
+	}
+	return c, nil
+}
+
+// ClientID returns the client identifier, which may have been assigned by
+// an MQTT 5 server in CONNACK.
+func (c *Client) ClientID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.clientID
+}
+
+// SetCredentials replaces the username and password sent in the next
+// CONNECT (mosquitto_username_pw_set).
+func (c *Client) SetCredentials(username string, password []byte) error {
+	if err := checkCredentials(c.opts.ProtocolVersion, username, password); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.username, c.password = username, password
+	c.mu.Unlock()
+	return nil
+}
+
+// SetWill replaces the Will sent in the next CONNECT; nil clears it
+// (mosquitto_will_set_v5 / mosquitto_will_clear).
+func (c *Client) SetWill(w *Message) error {
+	if err := checkWill(c.opts.ProtocolVersion, w); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.will = copyMessage(w)
+	c.mu.Unlock()
+	return nil
+}
+
+// IsConnected reports whether the client has an accepted connection.
+func (c *Client) IsConnected() bool {
+	c.mu.Lock()
+	cn := c.cn
+	c.mu.Unlock()
+	return cn != nil && cn.active.Load() && !cn.isClosed()
+}
+
+// Connect opens a network connection, sends CONNECT and waits for CONNACK
+// or for ctx to end. OnConnect is called when CONNACK arrives; if the
+// connection is refused, Connect returns a *ConnRefusedError and
+// OnDisconnect follows.
+//
+// Connect does not reconnect after the connection is lost; OnDisconnect
+// reports the loss and Connect may be called again.
+func (c *Client) Connect(ctx context.Context) (ConnAck, error) {
+	c.mu.Lock()
+	if c.cn != nil {
+		c.mu.Unlock()
+		return ConnAck{}, ErrAlreadyConnected
+	}
+	cn := newConn(c)
+	c.cn = cn
+	c.retainAvailable = true
+	c.mu.Unlock()
+
+	if c.h.OnPreConnect != nil {
+		c.h.OnPreConnect(c)
+	}
+
+	nc, err := c.dial(ctx)
+	if err != nil {
+		c.mu.Lock()
+		c.cn = nil
+		c.mu.Unlock()
+		return ConnAck{}, fmt.Errorf("mqttclient: connect to %s: %w", c.srv.addr, err)
+	}
+
+	c.mu.Lock()
+	pk := newConnect(connectParams{
+		version:         c.opts.ProtocolVersion,
+		clientID:        c.clientID,
+		cleanStart:      c.opts.CleanStart,
+		keepAlive:       c.opts.KeepAlive,
+		username:        c.username,
+		password:        c.password,
+		will:            c.will,
+		retainAvailable: c.retainAvailable,
+		properties:      c.opts.ConnectProperties,
+		receiveMaximum:  c.opts.ReceiveMaximum,
+	})
+	c.mu.Unlock()
+
+	cn.start(nc)
+	if cn.userDisconnect.Load() {
+		cn.close(nil)
+		<-cn.finished
+		return ConnAck{}, ErrDisconnected
+	}
+
+	c.log.Debug("sending CONNECT", "client_id", pk.Connect.ClientIdentifier)
+	deadline, _ := ctx.Deadline()
+	if err := cn.write(&pk, deadline); err != nil {
+		<-cn.finished
+		return ConnAck{}, cn.connectErr()
+	}
+
+	select {
+	case r := <-cn.connack:
+		if r.err != nil {
+			<-cn.finished
+		}
+		return r.ack, r.err
+	case <-cn.finished:
+		select {
+		case r := <-cn.connack:
+			return r.ack, r.err
+		default:
+			return ConnAck{}, cn.connectErr()
+		}
+	case <-ctx.Done():
+		cn.close(ctx.Err())
+		<-cn.finished
+		return ConnAck{}, ctx.Err()
+	}
+}
+
+// Disconnect sends DISCONNECT with the given MQTT 5 reason code and
+// properties, closes the connection and waits for it to shut down
+// (mosquitto_disconnect_v5). For MQTT 3.x, reason must be 0 and props nil.
+// OnDisconnect is called with a nil Err.
+func (c *Client) Disconnect(ctx context.Context, reason byte, props *Properties) error {
+	if c.opts.ProtocolVersion != MQTT5 && (reason != 0 || props != nil) {
+		return fmt.Errorf("%w: DISCONNECT reason code and properties require MQTT 5", ErrNotSupported)
+	}
+	c.mu.Lock()
+	cn := c.cn
+	c.mu.Unlock()
+	if cn == nil {
+		return ErrNoConn
+	}
+	cn.userDisconnect.Store(true)
+	if !cn.started.Load() {
+		return ErrNoConn // Connect is still dialling; it will see userDisconnect.
+	}
+
+	pk := newDisconnect(c.opts.ProtocolVersion, reason, props)
+	deadline, _ := ctx.Deadline()
+	err := cn.write(&pk, deadline)
+	cn.close(nil)
+	select {
+	case <-cn.finished:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return err
+}
+
+func (c *Client) dial(ctx context.Context) (net.Conn, error) {
+	var d net.Dialer
+	if !c.srv.useTLS {
+		return d.DialContext(ctx, "tcp", c.srv.addr)
+	}
+	cfg := &tls.Config{}
+	if c.opts.TLSConfig != nil {
+		cfg = c.opts.TLSConfig.Clone()
+	}
+	if cfg.ServerName == "" {
+		cfg.ServerName = c.srv.host
+	}
+	td := tls.Dialer{NetDialer: &d, Config: cfg}
+	return td.DialContext(ctx, "tcp", c.srv.addr)
+}
+
+func copyMessage(m *Message) *Message {
+	if m == nil {
+		return nil
+	}
+	cp := *m
+	return &cp
+}

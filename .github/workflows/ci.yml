@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.modfile }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # go.mod builds against the AUTOSOLN comqtt fork; go.upstream.mod
+        # against upstream wind-c/comqtt, to prove the client does not rely on
+        # fork-only behaviour (consumers may not carry the replace).
+        modfile: [go.mod, go.upstream.mod]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet -modfile=${{ matrix.modfile }} ./...
+      - run: go test -race -count=1 -modfile=${{ matrix.modfile }} ./...
+
+  conformance:
+    name: mosquitto conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: eclipse-mosquitto/mosquitto
+          ref: v2.1.2
+          path: mosquitto
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: ./conformance/run.sh
+        env:
+          MOSQUITTO_SRC: mosquitto

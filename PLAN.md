@@ -78,7 +78,7 @@ The fork was written as a broker codec. These problems show up when a client use
 
 | # | Issue | Where | Action |
 |---|---|---|---|
-| 1 | `DisconnectDecode` only reads the reason code when `Remaining > 1`. A v5 DISCONNECT with `Remaining == 1` (reason code, no properties, which the spec allows) loses its reason code. | `packets.go:568` | **Fix in fork** (`>= 1`) and add a test. Also read the reason byte directly in the client, so the module works with whatever comqtt commit a consumer pins. |
+| 1 | `DisconnectDecode` only reads the reason code when `Remaining > 1`. A v5 DISCONNECT with `Remaining == 1` (reason code, no properties, which the spec allows) loses its reason code. | `packets.go:568` | **Fixed in fork** (branch `BB-724`; `> 0`, test `TDisconnectReasonCodeOnly`). Also read the reason byte directly in the client, so the module works with whatever comqtt commit a consumer pins. |
 | 2 | `Properties.Decode` returns EOF on an empty buffer. A broker that refuses v5 often sends a v3-style CONNACK (`Remaining == 2`, rc `0x01`), which then fails to decode. | `properties.go:372`, `ConnackDecode` | In the client: when `Remaining == 2`, decode the CONNACK as v4 |
 | 3 | `ResponseTopic` and `CorrelationData` (PUBLISH and Will) are silently dropped unless `Mods.AllowResponseInfo` is true. | `properties.go` Encode | Client always sets `AllowResponseInfo = true` on outbound packets |
 | 4 | `Mods.MaxSize` silently drops ReasonString and User properties. Nothing checks the total packet size against the server's Maximum Packet Size. | Encode | Client sets `MaxSize` from CONNACK and rejects oversize PUBLISH with an error (mosquitto `MOSQ_ERR_OVERSIZE_PACKET`) |
@@ -94,8 +94,7 @@ fork-only behaviour.
 
 ## Module layout and wiring
 
-The module lives in its own public repository, scaffolded locally at `~/mycode/mqtt-client`.
-The GitHub repository hasn't been created yet.
+The module lives in its own public repository, `github.com/AUTOSOLN/mqtt-client`.
 
 ```
 github.com/AUTOSOLN/mqtt-client     (package mqttclient, BSD-3-Clause)
@@ -103,8 +102,9 @@ github.com/AUTOSOLN/mqtt-client     (package mqttclient, BSD-3-Clause)
     module github.com/AUTOSOLN/mqtt-client
     go 1.25.5                         // not higher: fork needs 1.25.5, broker libs are on 1.25.5
     require github.com/wind-c/comqtt/v2 v2.6.1
-    replace github.com/wind-c/comqtt/v2 => github.com/AUTOSOLN/comqtt/v2 v2.6.2-0.20260921140535-e56077a993a1
-  go.upstream.mod                     // same, without the replace (CI compatibility job)
+    replace github.com/wind-c/comqtt/v2 => github.com/AUTOSOLN/comqtt/v2 v2.6.2-0.20261002195201-5268a0644cd6
+  go.upstream.mod, go.upstream.sum    // same, without the replace (CI compatibility job)
+  .github/workflows/ci.yml
   doc.go, LICENSE, README.md, PLAN.md
   *.go                                // the client (see Internal design)
   conformance/                        // Go ports of mosquitto test/lib/c programs
@@ -130,7 +130,7 @@ building or testing this repository. Each consumer adds its own:
   replace github.com/wind-c/comqtt/v2 => github.com/AUTOSOLN/comqtt/v2 <pseudo-version>
   ```
 - **broker**: `go get github.com/AUTOSOLN/mqtt-client@v0.1.0`. Its existing comqtt `replace`
-  decides which fork commit is used. Its pin (`28e9277`) is older than ours (`e56077a`). The
+  decides which fork commit is used. Its pin (`28e9277`) is older than ours (`5268a06`, branch `BB-724`). The
   upstream CI job is what proves we don't depend on anything that differs between commits. The
   repository is public, so no `GOPRIVATE` is needed.
 
@@ -144,73 +144,82 @@ in production.
 `replace`, using `-modfile=go.upstream.mod`. That proves the client doesn't depend on
 fork-only behaviour.
 
-## Proposed API
+## API
 
-The client keeps mosquitto's model: each operation returns a message id (mid), completions arrive
-on callbacks, and a background loop reconnects automatically. It also adds Go idioms: `context`,
-blocking waits and goroutine safety. Callbacks run on a single dispatcher goroutine, in order,
-the same as callbacks on mosquitto's loop thread.
+The client keeps mosquitto's model: callbacks report what happens on the connection, and options
+and setters mirror `mosquitto_*_set`. It adds Go idioms: `context`, blocking calls that wait for
+the server, and goroutine safety. Callbacks run one at a time, in order, on a dispatcher goroutine,
+the same as callbacks on mosquitto's loop thread. The dispatcher goroutine exists only while
+callbacks are queued.
+
+### Implemented (phase 1)
 
 ```go
-package mqttclient
+func New(opts Options, h Handlers) (*Client, error)               // mosquitto_new + option setters
+func (c *Client) Connect(ctx context.Context) (ConnAck, error)    // dial, CONNECT, wait for CONNACK; no reconnect
+func (c *Client) Disconnect(ctx context.Context, reason byte, props *Properties) error  // mosquitto_disconnect_v5; waits for teardown
+func (c *Client) SetCredentials(username string, password []byte) error               // mosquitto_username_pw_set
+func (c *Client) SetWill(w *Message) error                                            // will_set_v5; nil = will_clear
+func (c *Client) ClientID() string                                                    // includes a server-assigned id
+func (c *Client) IsConnected() bool
 
 type Options struct {
-    Servers         []*url.URL      // mqtt://, mqtts:// (tcp, ssl, tls aliases); no ws/wss
-    ProtocolVersion byte            // 4 = 3.1.1, 5 = 5.0   (mosquitto_opts_set MOSQ_OPT_PROTOCOL_VERSION)
-    ClientID        string
-    CleanStart      bool            // clean session (3.1.1) / clean start (5)
-    KeepAlive       uint16
-    SessionExpiry   uint32          // v5
-    Username        string          // mosquitto_username_pw_set
-    Password        []byte
-    Will            *Message        // mosquitto_will_set[_v5]
-    TLS             *tls.Config     // mosquitto_tls_set / tls_opts_set / tls_insecure_set
-    ConnectProps    *Properties     // v5 CONNECT properties (receive max, max packet size, user props…)
-    MaxInflight     uint16          // mosquitto_max_inflight_messages_set (v3; v5 also bounded by server Receive Maximum)
-    ReconnectDelay  time.Duration   // mosquitto_reconnect_delay_set(delay, max, exponential)
-    ReconnectMax    time.Duration
-    ReconnectExp    bool
-    Logger          *slog.Logger    // on_log
+    Server            string        // one URL: mqtt:// tcp:// (1883), mqtts:// ssl:// tls:// (8883)
+    ProtocolVersion   byte          // MQTT31, MQTT311 (default, as mosquitto), MQTT5
+    ClientID          string        // empty only with CleanStart; MQTT31 gets a random mosq-… id
+    CleanStart        bool
+    KeepAlive         uint16        // seconds; 0 or >= 5
+    Username          string
+    Password          []byte
+    Will              *Message
+    ConnectProperties *Properties   // MQTT 5
+    ReceiveMaximum    uint16        // default 20; always sent in MQTT 5 CONNECT, as mosquitto does
+    MaxInflight       uint16        // default 20 (used from phase 2)
+    TLSConfig         *tls.Config
+    Logger            *slog.Logger
 }
 
 type Handlers struct {
-    OnConnect     func(c *Client, ack ConnAck)               // on_connect_v5 (re-subscribe here)
-    OnDisconnect  func(c *Client, reason byte, props *Properties, err error)
-    OnMessage     func(c *Client, m *Message)                 // on_message_v5
-    OnPublish     func(c *Client, mid uint16, reason byte, props *Properties)
-    OnSubscribe   func(c *Client, mid uint16, granted []byte, props *Properties)
-    OnUnsubscribe func(c *Client, mid uint16, reasons []byte, props *Properties)
+    OnPreConnect func(c *Client)                     // synchronous, before dialling
+    OnConnect    func(c *Client, ack ConnAck)        // every CONNACK, accepted or refused
+    OnDisconnect func(c *Client, ev DisconnectEvent) // once per established connection
 }
 
-type Message struct {
-    Topic   string
-    Payload []byte
-    QoS     byte
-    Retain  bool
-    Dup     bool
-    Props   *Properties // v5
+type DisconnectEvent struct {
+    Err        error       // nil for Disconnect(); else ErrConnectionLost, ErrKeepalive, ErrProtocol,
+                           // ErrMalformedPacket, ErrServerDisconnect, *ConnRefusedError, ctx error
+    ReasonCode byte        // server DISCONNECT (MQTT 5)
+    Properties *Properties
 }
+```
 
-type Properties = packets.Properties // alias for now; wrap later if we want to decouple
+`Server` is a single URL rather than a list: mosquitto connects to one host, and so does swarmy.
 
-func New(opts Options, h Handlers) (*Client, error)               // mosquitto_new
-func (c *Client) Start(ctx context.Context) error                 // connect_async + loop_start (auto-reconnect)
-func (c *Client) Connect(ctx context.Context) (ConnAck, error)    // one blocking connect, no loop; for tests and tools
-func (c *Client) Publish(ctx context.Context, m *Message) (*Pending, error)
-func (c *Client) Subscribe(ctx context.Context, subs []Subscription, props *Properties) (*Pending, error)  // subscribe_multiple / _v5
-func (c *Client) Unsubscribe(ctx context.Context, topics []string, props *Properties) (*Pending, error)   // unsubscribe_multiple / _v5
-func (c *Client) Disconnect(ctx context.Context, reason byte, props *Properties) error                    // disconnect_v5; stops loop
-func (c *Client) IsConnected() bool
+### Still to come
+
+```go
+// Handlers additions
+OnMessage     func(c *Client, m *Message)                                  // phase 2
+OnPublish     func(c *Client, mid uint16, reason byte, props *Properties)  // phase 2
+OnSubscribe   func(c *Client, mid uint16, granted []byte, props *Properties) // phase 3
+OnUnsubscribe func(c *Client, mid uint16, reasons []byte, props *Properties) // phase 3
+
+func (c *Client) Publish(ctx context.Context, m *Message) (*Pending, error)                              // phase 2
+func (c *Client) Subscribe(ctx context.Context, subs []Subscription, props *Properties) (*Pending, error) // phase 3
+func (c *Client) Unsubscribe(ctx context.Context, topics []string, props *Properties) (*Pending, error)   // phase 3
+func (c *Client) Start(ctx context.Context) error   // phase 4: connect_async + loop_forever semantics (reconnect)
 
 type Pending struct{ Mid uint16 /* … */ }
-func (p *Pending) Wait(ctx context.Context) (Result, error)        // blocking style for swarmy (replaces paho's sync calls)
+func (p *Pending) Wait(ctx context.Context) (Result, error)
+
+// Options additions (phase 4): ReconnectDelay, ReconnectDelayMax, ReconnectExponential
 ```
 
 ## Internal design
 
 ```
             ┌──────────── Client ────────────┐
- Publish ──▶│ session: mid alloc, outbound   │──▶ writer goroutine ──▶ conn
+ Publish ──▶│ session: mid alloc, outbound   │──▶ write (mutex) ───────▶ conn
  Subscribe  │   inflight (QoS1/2), inbound    │                          │
             │   QoS2 awaiting-PUBREL, pending │◀── reader goroutine ◀────┘
             │   sub/unsub, receive-max sema   │        (ReadFixedHeader / ReadPacket port)
@@ -306,8 +315,8 @@ the UI.
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| 0 | ~~Repository scaffold (`go.mod`, `doc.go`, LICENSE, README, comqtt `replace`)~~ **done locally**. Remaining: create `AUTOSOLN/mqtt-client` on GitHub and push; fix codec gap #1 in the fork and add a test; add `go.upstream.mod` and the CI job. | `go vet ./...` passes (it does); fork test passes |
-| 1 | Dial (tcp, tls), CONNECT/CONNACK, keepalive, DISCONNECT, v3.1.1 and v5 | conformance `01-con-discon-*`, `01-keepalive-*`, `01-will-*`, `01-unpwd-*` pass |
+| 0 | **Done.** Repository, LICENSE, README; comqtt gap #1 fixed on branch `BB-724` (`5268a06`, not yet merged to main); `go.upstream.mod`; CI workflow (tests with both modfiles, mosquitto conformance) | `go vet`, `go test -race` pass with both modfiles |
+| 1 | **Done.** Dial (tcp, tls), CONNECT/CONNACK, keepalive, PINGREQ/PINGRESP both ways, DISCONNECT both ways, protocol-error DISCONNECT, v3.1, v3.1.1 and v5 | all 12 non-auth `01-*` conformance cases pass; unit tests with a scripted broker pass 20× under `-race` |
 | 2 | PUBLISH out and in at QoS 0/1/2, mid allocator, inflight, receive maximum, max packet size | `03-*` and `11-*` pass |
 | 3 | SUBSCRIBE and UNSUBSCRIBE (multiple, v5 options and properties), `Pending.Wait` | `02-*` pass |
 | 4 | Supervisor: reconnect backoff, session resumption, `OnConnect` re-subscribe pattern | `01-no-clean-session`, `03-*-disconnect` pass; integration tests that kill the broker pass |
@@ -318,6 +327,17 @@ the UI.
 Phases 1–4 are the bulk of the work. Phase 5 is small: about 150 lines in `main.go` change,
 almost all of it in `connectOne`, `buildConnConfig`, `onConnectionUp`, `onPublishReceived`,
 `mqttPublish` and `mqttDisconnectOne`.
+
+## Deviations from mosquitto (so far)
+
+| Behaviour | mosquitto | this client | Why |
+|---|---|---|---|
+| CONNECT property order | application properties first, then Receive Maximum | comqtt's fixed order | MQTT does not define an order. One conformance script is overridden for this (`conformance/overrides/01-con-discon-success-v5.py`). |
+| MQTT 5 CONNACK refusal (reason ≥ 0x80) | returns `MOSQ_ERR_PROTOCOL`, so `handle__packet` sends DISCONNECT 0x82 | closes without sending DISCONNECT; error is `*ConnRefusedError` | The server already closed the session; replying with a protocol error is noise. |
+| 3.x CONNACK to an MQTT 5 CONNECT | `on_connect(0x84)`, then protocol error | `OnConnect(0x84)`, `*ConnRefusedError{0x84}` | Same report, clearer error type. |
+| `mosquitto_connect` | returns after sending CONNECT; CONNACK arrives in the loop | `Connect` waits for CONNACK (or ctx) | Go callers want the result; OnConnect still fires. |
+| Retain Available reset | reset to "available" by `mosquitto_connect`, kept across `mosquitto_reconnect` | reset by every `Connect` | Matches mosquitto for explicit connects; phase 4's reconnect loop must keep the server's last value. |
+| Inbound QoS 2 duplicate (phase 2) | queues a second copy under the same mid | will replace the stored copy | See Internal design. |
 
 ## Risks
 

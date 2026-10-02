@@ -4,7 +4,37 @@ An MQTT 3.1.1 / 5.0 client for Go, modelled on the
 [libmosquitto](https://github.com/eclipse-mosquitto/mosquitto) client API and
 built on the [comqtt](https://github.com/AUTOSOLN/comqtt) packet codec.
 
-Status: pre-alpha, under construction. See [PLAN.md](PLAN.md).
+Status: pre-alpha. Connect, keepalive and disconnect work for MQTT 3.1, 3.1.1
+and 5 over TCP and TLS; publish and subscribe are next. See [PLAN.md](PLAN.md).
+
+```go
+c, err := mqttclient.New(mqttclient.Options{
+	Server:          "mqtt://localhost:1883",
+	ProtocolVersion: mqttclient.MQTT5,
+	ClientID:        "example",
+	CleanStart:      true,
+	KeepAlive:       60,
+}, mqttclient.Handlers{
+	OnDisconnect: func(_ *mqttclient.Client, ev mqttclient.DisconnectEvent) {
+		log.Println("disconnected:", ev.Err)
+	},
+})
+if err != nil {
+	log.Fatal(err)
+}
+if _, err := c.Connect(ctx); err != nil {
+	log.Fatal(err)
+}
+defer c.Disconnect(ctx, 0, nil)
+```
+
+## Testing
+
+```
+go test -race ./...
+./conformance/run.sh      # libmosquitto's client test suite; needs python3 and
+                          # a mosquitto checkout (MOSQUITTO_SRC, default ../mosquitto)
+```
 
 ## Using it
 
