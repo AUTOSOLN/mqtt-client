@@ -123,11 +123,12 @@ func init() {
 			})
 		},
 
-		"03-publish-loop": publishLoop,
-		// mosquitto runs the same script with each of its loop functions.
-		"03-publish-loop-forever": publishLoop,
-		"03-publish-loop-manual":  publishLoop,
-		"03-publish-loop-start":   publishLoop,
+		"03-publish-loop": func(port int) int { return publishLoop(client, port) },
+		// mosquitto runs the same script with each of its loop functions;
+		// mosquitto_loop_forever maps to Run.
+		"03-publish-loop-forever": func(port int) int { return publishLoop(runForever, port) },
+		"03-publish-loop-manual":  func(port int) int { return publishLoop(client, port) },
+		"03-publish-loop-start":   func(port int) int { return publishLoop(client, port) },
 
 		"03-request-response-1": func(port int) int {
 			return requester(port, &mqttclient.Properties{ResponseTopic: "response/topic"})
@@ -178,8 +179,8 @@ func init() {
 
 // publishLoop subscribes, publishes to its own subscription, and disconnects
 // when the message comes back.
-func publishLoop(port int) int {
-	return client(port, mqttclient.Options{ClientID: "loop-test", ProtocolVersion: v5}, mqttclient.Handlers{
+func publishLoop(start starter, port int) int {
+	return start(port, mqttclient.Options{ClientID: "loop-test", ProtocolVersion: v5}, mqttclient.Handlers{
 		OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) { subscribe(c, "loop/test", 0) },
 		OnSubscribe: func(c *mqttclient.Client, _ uint16, _ []byte, _ *mqttclient.Properties) {
 			if _, err := publish(c, "loop/test", "message", 0, nil); err != nil {

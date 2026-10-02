@@ -56,6 +56,30 @@ func client(port int, opts mqttclient.Options, h mqttclient.Handlers) int {
 	return <-done
 }
 
+// runForever is client for the programs that use mosquitto_loop_forever:
+// Run keeps the connection up, reconnecting after a loss, and the program
+// ends when Run returns (after Disconnect).
+func runForever(port int, opts mqttclient.Options, h mqttclient.Handlers) int {
+	opts.Server = fmt.Sprintf("mqtt://localhost:%d", port)
+	opts.CleanStart = true
+	if opts.KeepAlive == 0 {
+		opts.KeepAlive = 60
+	}
+	c, err := mqttclient.New(opts, h)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	if err := c.Run(context.Background()); err != nil {
+		fmt.Fprintln(os.Stderr, "run:", err)
+		return 1
+	}
+	return 0
+}
+
+// starter is client or runForever.
+type starter func(port int, opts mqttclient.Options, h mqttclient.Handlers) int
+
 func connect(c *mqttclient.Client) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -144,12 +168,12 @@ func publishMany(port int, opts mqttclient.Options, n int, qos byte) int {
 	})
 }
 
-// publishReconnect publishes once on the first connection and reconnects
-// whenever the connection is lost, until a clean disconnect
-// (mosquitto_reconnect from on_disconnect).
+// publishReconnect publishes once on the first connection and disconnects
+// when it is complete. The script drops the connection before that, so Run
+// reconnects and resends the message (mosquitto_loop_forever).
 func publishReconnect(port int, id string, qos byte, topic string) int {
 	first := true
-	return client(port, mqttclient.Options{ClientID: id}, mqttclient.Handlers{
+	return runForever(port, mqttclient.Options{ClientID: id}, mqttclient.Handlers{
 		OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) {
 			if first {
 				first = false
@@ -160,18 +184,6 @@ func publishReconnect(port int, id string, qos byte, topic string) int {
 			}
 		},
 		OnPublish: func(c *mqttclient.Client, _ uint16, _ byte, _ *mqttclient.Properties) { disconnect(c) },
-		OnDisconnect: func(c *mqttclient.Client, ev mqttclient.DisconnectEvent) {
-			if ev.Err == nil {
-				finish(0)
-				return
-			}
-			go func() {
-				if err := connect(c); err != nil {
-					fmt.Fprintln(os.Stderr, "reconnect:", err)
-					finish(1)
-				}
-			}()
-		},
 	})
 }
 
@@ -201,9 +213,9 @@ func maximumQoS(port int, max byte) int {
 
 // sendOnce publishes one QoS 0 message and disconnects when OnPublish
 // reports its mid.
-func sendOnce(port int, opts mqttclient.Options, topic, payload string, props *mqttclient.Properties) int {
+func sendOnce(start starter, port int, opts mqttclient.Options, topic, payload string, props *mqttclient.Properties) int {
 	var sent uint16
-	return client(port, opts, mqttclient.Handlers{
+	return start(port, opts, mqttclient.Handlers{
 		OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) {
 			p, err := publish(c, topic, payload, 0, props)
 			if err != nil {
@@ -287,17 +299,18 @@ func init() {
 			})
 		},
 		"03-publish-qos0": func(port int) int {
-			return sendOnce(port, mqttclient.Options{ClientID: "publish-qos0-test"}, "pub/qos0/test", "message", nil)
+			// The C program uses mosquitto_loop_forever.
+			return sendOnce(runForever, port, mqttclient.Options{ClientID: "publish-qos0-test"}, "pub/qos0/test", "message", nil)
 		},
 		"03-publish-qos0-no-payload": func(port int) int {
-			return sendOnce(port, mqttclient.Options{ClientID: "publish-qos0-test-np"}, "pub/qos0/no-payload/test", "", nil)
+			return sendOnce(client, port, mqttclient.Options{ClientID: "publish-qos0-test-np"}, "pub/qos0/no-payload/test", "", nil)
 		},
 		"11-prop-send-content-type": func(port int) int {
-			return sendOnce(port, mqttclient.Options{ClientID: "prop-test", ProtocolVersion: v5}, "prop/qos0", "message",
+			return sendOnce(client, port, mqttclient.Options{ClientID: "prop-test", ProtocolVersion: v5}, "prop/qos0", "message",
 				&mqttclient.Properties{ContentType: "application/json"})
 		},
 		"11-prop-send-payload-format": func(port int) int {
-			return sendOnce(port, mqttclient.Options{ClientID: "prop-test", ProtocolVersion: v5}, "prop/qos0", "message",
+			return sendOnce(client, port, mqttclient.Options{ClientID: "prop-test", ProtocolVersion: v5}, "prop/qos0", "message",
 				&mqttclient.Properties{PayloadFormat: 1})
 		},
 		"11-prop-oversize-packet": func(port int) int {

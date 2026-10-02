@@ -4,10 +4,6 @@ An MQTT 3.1.1 / 5.0 client for Go, modelled on the
 [libmosquitto](https://github.com/eclipse-mosquitto/mosquitto) client API and
 built on the [comqtt](https://github.com/AUTOSOLN/comqtt) packet codec.
 
-Status: pre-alpha. Connect, keepalive, disconnect, publish (QoS 0, 1 and 2,
-both directions), subscribe and unsubscribe work for MQTT 3.1, 3.1.1 and 5 over
-TCP and TLS; automatic reconnect is next. See [PLAN.md](PLAN.md).
-
 ```go
 c, err := mqttclient.New(mqttclient.Options{
 	Server:          "mqtt://localhost:1883",
@@ -30,6 +26,10 @@ c, err := mqttclient.New(mqttclient.Options{
 if err != nil {
 	log.Fatal(err)
 }
+// Either keep the connection up, reconnecting as needed (blocks until ctx
+// ends or Disconnect):
+//     go func() { log.Println("run:", c.Run(ctx)) }()
+// or connect once:
 if _, err := c.Connect(ctx); err != nil {
 	log.Fatal(err)
 }
@@ -48,13 +48,16 @@ if _, err := p.Wait(ctx); err != nil { // PUBACK received, or refused
 
 ```
 go test -race ./...
+(cd integration && go test -race ./...)   # starts its own mosquitto; skips without one
 ./conformance/run.sh      # libmosquitto's client test suite; needs python3 and
                           # a mosquitto checkout (MOSQUITTO_SRC, default ../mosquitto)
 ```
 
 For manual tests against a real broker, see [cmd/mqttconnect](cmd/mqttconnect)
-(connect and disconnect), [cmd/mqttpub](cmd/mqttpub) (publish) and
-[cmd/mqttsub](cmd/mqttsub) (subscribe and unsubscribe).
+(connect and disconnect), [cmd/mqttpub](cmd/mqttpub) (publish),
+[cmd/mqttsub](cmd/mqttsub) (subscribe and unsubscribe) and
+[cmd/interactiveclient](cmd/interactiveclient) (a long-running app on `Run`
+that reconnects by itself).
 
 ## Using it
 

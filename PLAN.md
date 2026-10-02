@@ -81,7 +81,7 @@ The fork was written as a broker codec. These problems show up when a client use
 | 1 | `DisconnectDecode` only reads the reason code when `Remaining > 1`. A v5 DISCONNECT with `Remaining == 1` (reason code, no properties, which the spec allows) loses its reason code. | `packets.go:568` | **Fixed in fork** (branch `BB-724`; `> 0`, test `TDisconnectReasonCodeOnly`). Also read the reason byte directly in the client, so the module works with whatever comqtt commit a consumer pins. |
 | 2 | `Properties.Decode` returns EOF on an empty buffer. A broker that refuses v5 often sends a v3-style CONNACK (`Remaining == 2`, rc `0x01`), which then fails to decode. | `properties.go:372`, `ConnackDecode` | In the client: when `Remaining == 2`, decode the CONNACK as v4 |
 | 3 | `ResponseTopic` and `CorrelationData` (PUBLISH and Will) are silently dropped unless `Mods.AllowResponseInfo` is true. | `properties.go` Encode | Client always sets `AllowResponseInfo = true` on outbound packets |
-| 4 | `Mods.MaxSize` silently drops ReasonString and User properties. Nothing checks the total packet size against the server's Maximum Packet Size. | Encode | Client sets `MaxSize` from CONNACK and rejects oversize PUBLISH with an error (mosquitto `MOSQ_ERR_OVERSIZE_PACKET`) |
+| 4 | `Mods.MaxSize` silently drops ReasonString and User properties. Nothing checks the total packet size against the server's Maximum Packet Size. | Encode | Client leaves `MaxSize` 0 (nothing dropped), measures the encoded packet, and rejects one over the server's Maximum Packet Size with `ErrOversizePacket` (mosquitto `MOSQ_ERR_OVERSIZE_PACKET`) |
 | 5 | `FixedHeader.Type`, `ProtocolVersion` and `Connect.ProtocolName` ("MQTT") must be set before encoding. `Type` selects the properties table. | all | Private constructors in the client (`newConnect`, `newPublish`, …) |
 | 6 | Flag-gated properties: `SessionExpiryIntervalFlag`, `RequestProblemInfoFlag`, `PayloadFormatFlag`, `TopicAliasFlag`. Setting a value without its flag does nothing. | Encode | Builders set the flags |
 | 7 | `PublishDecode` and `SubackDecode` slice the input buffer. | decode | Allocate a new buffer per packet. Don't use a shared read buffer. |
@@ -152,7 +152,7 @@ the server, and goroutine safety. Callbacks run one at a time, in order, on a di
 the same as callbacks on mosquitto's loop thread. The dispatcher goroutine exists only while
 callbacks are queued.
 
-### Implemented (phases 1–3)
+### Implemented (phases 1–4)
 
 ```go
 func New(opts Options, h Handlers) (*Client, error)               // mosquitto_new + option setters
@@ -165,6 +165,7 @@ func (c *Client) IsConnected() bool
 func (c *Client) Publish(ctx context.Context, m *Message) (*Pending, error)          // mosquitto_publish_v5 (phase 2)
 func (c *Client) Subscribe(ctx context.Context, subs []Subscription, props *Properties) (*Pending, error) // phase 3
 func (c *Client) Unsubscribe(ctx context.Context, topics []string, props *Properties) (*Pending, error)   // phase 3
+func (c *Client) Run(ctx context.Context) error   // phase 4: mosquitto_loop_forever with reconnect; blocks
 
 type Subscription struct {
     Topic             string // filter; + and # wildcards
@@ -198,6 +199,10 @@ type Options struct {
     ClientID          string        // empty only with CleanStart; MQTT31 gets a random mosq-… id
     CleanStart        bool
     KeepAlive         uint16        // seconds; 0 or >= 5
+    ReconnectDelay       time.Duration // Run (phase 4): default 1s
+    ReconnectDelayMax    time.Duration // default ReconnectDelay (a fixed 1s, as libmosquitto)
+    ReconnectExponential bool          // delay*(n+1)^2 instead of delay*(n+1)
+    ConnectTimeout       time.Duration // each Run attempt, dial to CONNACK; default 30s
     Username          string
     Password          []byte
     Will              *Message
@@ -214,6 +219,7 @@ type Handlers struct {
     OnDisconnect func(c *Client, ev DisconnectEvent) // once per established connection
     OnMessage    func(c *Client, m *Message)         // QoS 0/1 on arrival (after PUBACK), QoS 2 on PUBREL (after PUBCOMP)
     OnPublish    func(c *Client, mid uint16, reason byte, props *Properties) // QoS 0 written, PUBACK, PUBCOMP, or failed PUBREC
+    OnConnectError func(c *Client, err error)                // Run: every failed attempt (phase 4)
     OnSubscribe   func(c *Client, mid uint16, granted []byte, props *Properties) // SUBACK (phase 3)
     OnUnsubscribe func(c *Client, mid uint16, reasons []byte, props *Properties) // UNSUBACK (phase 3)
 }
@@ -245,13 +251,25 @@ re-subscribe from `OnConnect`. Subscribe, Unsubscribe and Publish share one mid 
 `Pending.Wait` returns a `*ReasonCodeError` for the first refused filter, together with the
 `Result` holding every code.
 
+`Run` (planned as `Start`) is the supervisor. It blocks like `mosquitto_loop_forever`, so callers
+start it with `go c.Run(ctx)`; a blocking call is the Go idiom, and its return value reports why
+it stopped. It connects at once, and after a lost connection or a failed attempt it waits
+(`delay*(n+1)`, or `delay*(n+1)^2` with `ReconnectExponential`, capped at `ReconnectDelayMax`; a
+successful CONNACK resets `n`) and connects again. Each attempt runs `OnPreConnect`, resends
+unacknowledged messages after CONNACK, and runs `OnConnect`, where callers subscribe.
+`OnConnectError` reports each failed attempt. Run returns nil after `Disconnect`, which also stops
+it while it waits between attempts. It returns `ctx.Err()` when ctx ends, after a clean
+DISCONNECT (no Will). It also returns the error when retrying cannot help: a non-transient CONNACK
+refusal (anything but server unavailable, busy, quota or rate exceeded, unspecified or
+implementation-specific), a protocol error from the server, or a TLS certificate failure.
+`Connect` returns `ErrRunning` while Run is active. As with `mosquitto_reconnect`, Run's
+reconnects keep the server's last Retain Available, which decides whether a retained Will is sent
+with retain; `Connect` resets it.
+
 ### Still to come
 
-```go
-func (c *Client) Start(ctx context.Context) error   // phase 4: connect_async + loop_forever semantics (reconnect)
-
-// Options additions (phase 4): ReconnectDelay, ReconnectDelayMax, ReconnectExponential
-```
+Nothing for swarmy parity. Phase 7 (optional) adds outbound topic aliases, extended AUTH and a
+persistent inflight store.
 
 ## Internal design
 
@@ -269,8 +287,8 @@ func (c *Client) Start(ctx context.Context) error   // phase 4: connect_async + 
 
 Files at the repository root (✓ = exists):
 
-- ✓ `client.go`: `Client`, `New`, `Connect`, `Disconnect`, dialling (tcp, tls); later `Start` and
-  the supervisor loop
+- ✓ `client.go`: `Client`, `New`, `Connect`, `Disconnect`, dialling (tcp, tls)
+- ✓ `run.go`: `Run`, the supervisor loop, reconnect delay, permanent-error policy
 - ✓ `options.go`: `Options`, `Handlers`, `Message`, defaults, validation, topic checks
 - ✓ `conn.go`: one network connection: reader goroutine, keepalive (PINGREQ on idle, PINGRESP
   timeout), CONNACK and DISCONNECT handling, teardown
@@ -314,8 +332,8 @@ Behaviour follows mosquitto (decision 3). Where mosquitto and paho differ, mosqu
   - Inbound: QoS 2 messages awaiting PUBREL are kept when CONNACK reports Session Present and
     dropped otherwise (see Deviations).
   - The inflight quota is reset to the server's Receive Maximum.
-  - **Done in phase 2** for an explicit `Connect` after a lost connection. Phase 4's supervisor
-    reuses it.
+  - Done in phase 2 for an explicit `Connect`; phase 4's `Run` uses the same path for every
+    reconnect.
 - **Retry on the same connection:** none. In mosquitto 2.x, `mosquitto_message_retry_set` does
   nothing (`messages_mosq.c:328`), and resends happen only after a CONNACK.
 - **v5 topic alias:** send `TopicAliasMaximum = 0` so the broker never sends us aliases. Outbound
@@ -359,7 +377,12 @@ the UI.
 4. **Integration:** run against a real `mosquitto` broker (built from the local repo) and an
    in-process comqtt broker, both v3.1.1 and v5. These live in a **nested module**,
    `integration/go.mod`, so the comqtt broker's dependencies (raft, badger, …) never
-   enter the root module's `go.mod` or `go.sum`.
+   enter the root module's `go.mod` or `go.sum`. **Phase 4:** `integration/` starts a private
+   mosquitto process per test (the `mosquitto` on PATH, or `$MOSQUITTO`) on a free port. It
+   kills it (SIGKILL) and restarts it, stops it cleanly with persistence for session
+   resumption, and covers a broker that is down at start, ctx cancel without a Will, and
+   Disconnect while waiting. CI installs mosquitto from apt. The in-process comqtt broker is
+   still to add.
 5. Run everything with `go test -race`. Add a fuzz target on `readPacket`.
 
 ## Phases
@@ -370,7 +393,7 @@ the UI.
 | 1 | **Done.** Dial (tcp, tls), CONNECT/CONNACK, keepalive, PINGREQ/PINGRESP both ways, DISCONNECT both ways, protocol-error DISCONNECT, v3.1, v3.1.1 and v5 | all 12 non-auth `01-*` conformance cases pass; unit tests with a scripted broker pass 20× under `-race` |
 | 2 | **Done.** PUBLISH out and in at QoS 0/1/2, mid allocator, inflight queue, receive maximum both ways, max packet size, resend after reconnect, `Pending.Wait`; `cmd/mqttpub` test tool | 19 of the 22 `03-*` scripts and all 6 `11-*` scripts pass (37 conformance cases in total; `11-prop-oversize-packet` with an override); the other three `03-*` scripts subscribe, so they move to phase 3; unit tests pass 20× under `-race` |
 | 3 | **Done.** SUBSCRIBE and UNSUBSCRIBE (multiple, v5 options and properties), `Pending` for SUBACK/UNSUBACK, the SUBSCRIBE/UNSUBSCRIBE size checks of `11-prop-oversize-packet`; `cmd/mqttsub` test tool | all 7 `02-*` scripts, and now all 22 `03-*` scripts, pass (47 conformance cases in total); unit tests pass 20× under `-race` |
-| 4 | Supervisor: reconnect backoff, session resumption, `OnConnect` re-subscribe pattern | `01-no-clean-session` and `03-*-disconnect` still pass with the supervisor instead of the ports' manual `Connect`; integration tests that kill the broker pass |
+| 4 | **Done.** Supervisor `Run`: reconnect backoff, session resumption, `OnConnect` re-subscribe pattern, `OnConnectError`; `cmd/interactiveclient` test application | `01-no-clean-session` passes; `03-*-disconnect`, `03-publish-qos0` and `03-publish-loop-forever` now run on `Run` (47 conformance cases pass); 5 integration tests against a killed and restarted mosquitto pass (5× in a row); unit tests pass 20× under `-race` |
 | 5 | **Swap swarmy over:** add the `require` and the comqtt `replace` (see Module wiring), replace autopaho in `main.go`, add `ProtocolVersion` to `ConnectionItem` and the UI, remove paho from `go.mod` and run `go mod tidy` | parity checklist done; manual run against mosquitto and comqtt brokers; tag `v0.1.0` |
 | 6 | **Broker adoption:** reimplement `libs/mqtt-client`'s `MQTTClient` interface (V3 and V5) on this module, then move `tests/broker-throughput`, `tests/functional` and `tests/sparkplug-client` over | those test tools run unchanged; paho removed from `libs/mqtt-client` |
 | 7 (optional) | Outbound topic alias, extended AUTH (`01-extended-auth-*`), persistent inflight store | as needed |
@@ -387,7 +410,9 @@ almost all of it in `connectOne`, `buildConnConfig`, `onConnectionUp`, `onPublis
 | MQTT 5 CONNACK refusal (reason ≥ 0x80) | returns `MOSQ_ERR_PROTOCOL`, so `handle__packet` sends DISCONNECT 0x82 | closes without sending DISCONNECT; error is `*ConnRefusedError` | The server already closed the session; replying with a protocol error is noise. |
 | 3.x CONNACK to an MQTT 5 CONNECT | `on_connect(0x84)`, then protocol error | `OnConnect(0x84)`, `*ConnRefusedError{0x84}` | Same report, clearer error type. |
 | `mosquitto_connect` | returns after sending CONNECT; CONNACK arrives in the loop | `Connect` waits for CONNACK (or ctx) | Go callers want the result; OnConnect still fires. |
-| Retain Available reset | reset to "available" by `mosquitto_connect`, kept across `mosquitto_reconnect` | reset by every `Connect` | Matches mosquitto for explicit connects; phase 4's reconnect loop must keep the server's last value. |
+| Retain Available reset | reset to "available" by `mosquitto_connect`, kept across `mosquitto_reconnect` | reset by `Connect`, kept across `Run`'s reconnects | Same as mosquitto. |
+| When the reconnect loop gives up | `loop_forever` returns on protocol errors (which include every MQTT 5 CONNACK refusal) and TLS errors, but retries MQTT 3.x refusals | `Run` returns on non-transient refusals for both versions (credentials, authorization, client id, protocol version, banned, …), protocol errors and TLS certificate failures; it retries "server unavailable/busy", quota, rate, unspecified and implementation-specific refusals | The same policy for both protocol versions; a busy MQTT 5 server is retried. |
+| Connection attempt timeout | none; a server that never sends CONNACK is detected only by keepalive | `ConnectTimeout` (default 30s) per `Run` attempt | Also works with keepalive 0. |
 | Maximum QoS, Maximum Packet Size, Receive Maximum from CONNACK | kept from an earlier CONNACK when absent | reset to the defaults (2, none, `MaxInflight`) on every CONNACK | The values describe the current connection. |
 | Inbound QoS 2 duplicate | queues a second copy under the same mid | replaces the stored copy | See Internal design. |
 | Maximum Packet Size check | leaves out the fixed header byte (`packet__check_oversize`), so it sends packets 1 byte over the limit | counts the whole packet (MQTT 5 §3.2.2.3.6) | A strict server would disconnect us. `conformance/overrides/11-prop-oversize-packet.py` shortens both payloads by one byte. |

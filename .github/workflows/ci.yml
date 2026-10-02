@@ -42,3 +42,18 @@ jobs:
       - run: ./conformance/run.sh
         env:
           MOSQUITTO_SRC: mosquitto
+
+  integration:
+    name: integration (real mosquitto)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: integration/go.mod
+      - name: install mosquitto
+        run: sudo apt-get update && sudo apt-get install -y mosquitto
+      - run: go vet ./...
+        working-directory: integration
+      - run: go test -race -count=1 ./...
+        working-directory: integration

@@ -148,7 +148,33 @@ func (f *ConnFlags) Options() (mqttclient.Options, error) {
 	return opts, nil
 }
 
-// Session is a client whose OnConnect and OnDisconnect are logged.
+// ReconnectFlags are the flags for Run's reconnect behaviour. Only tools
+// that use Session.Run register them.
+type ReconnectFlags struct {
+	Delay          time.Duration
+	DelayMax       time.Duration
+	Exponential    bool
+	ConnectTimeout time.Duration
+}
+
+// Register adds the reconnect flags to fs.
+func (r *ReconnectFlags) Register(fs *flag.FlagSet) {
+	fs.DurationVar(&r.Delay, "reconnect-delay", time.Second, "wait before reconnecting")
+	fs.DurationVar(&r.DelayMax, "reconnect-delay-max", 30*time.Second, "longest wait before reconnecting")
+	fs.BoolVar(&r.Exponential, "reconnect-exponential", false, "grow the wait quadratically instead of linearly")
+	fs.DurationVar(&r.ConnectTimeout, "connect-timeout", 30*time.Second, "limit for each connection attempt")
+}
+
+// Apply sets the reconnect options.
+func (r *ReconnectFlags) Apply(o *mqttclient.Options) {
+	o.ReconnectDelay = r.Delay
+	o.ReconnectDelayMax = r.DelayMax
+	o.ReconnectExponential = r.Exponential
+	o.ConnectTimeout = r.ConnectTimeout
+}
+
+// Session is a client whose OnConnect, OnDisconnect and OnConnectError are
+// logged.
 type Session struct {
 	C       *mqttclient.Client
 	Version byte
@@ -157,14 +183,24 @@ type Session struct {
 }
 
 // NewSession creates a client from the flags. h supplies the other
-// handlers; its OnConnect and OnDisconnect, if set, run after the logging.
-func NewSession(f *ConnFlags, h mqttclient.Handlers) (*Session, error) {
+// handlers; its OnConnect, OnDisconnect and OnConnectError, if set, run
+// after the logging. Each of more adjusts the options.
+func NewSession(f *ConnFlags, h mqttclient.Handlers, more ...func(*mqttclient.Options)) (*Session, error) {
 	opts, err := f.Options()
 	if err != nil {
 		return nil, err
 	}
+	for _, m := range more {
+		m(&opts)
+	}
 	s := &Session{Version: opts.ProtocolVersion, timeout: f.Timeout, lost: make(chan mqttclient.DisconnectEvent, 1)}
-	onConnect, onDisconnect := h.OnConnect, h.OnDisconnect
+	onConnect, onDisconnect, onConnectError := h.OnConnect, h.OnDisconnect, h.OnConnectError
+	h.OnConnectError = func(c *mqttclient.Client, err error) {
+		Logf("OnConnectError %v", err)
+		if onConnectError != nil {
+			onConnectError(c, err)
+		}
+	}
 	h.OnConnect = func(c *mqttclient.Client, ack mqttclient.ConnAck) {
 		Logf("OnConnect reason=0x%02x session_present=%v", ack.ReasonCode, ack.SessionPresent)
 		if onConnect != nil {
@@ -208,6 +244,17 @@ func (s *Session) Connect(ctx context.Context) (mqttclient.ConnAck, error) {
 		Logf("  CONNACK properties:%s", ConnackProps(p))
 	}
 	return ack, nil
+}
+
+// Run runs the client's supervisor (Client.Run) until ctx ends, Disconnect
+// is called or a permanent error. Ending ctx is not an error.
+func (s *Session) Run(ctx context.Context) error {
+	err := s.C.Run(ctx)
+	if errors.Is(err, context.Canceled) {
+		Logf("stopped")
+		return nil
+	}
+	return err
 }
 
 // Hold stays connected for d, until ctx ends (Ctrl-C), or until the

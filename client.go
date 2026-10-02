@@ -22,7 +22,8 @@ type Client struct {
 	sess session
 
 	mu              sync.Mutex
-	cn              *conn // current network connection, nil when disconnected
+	cn              *conn   // current network connection, nil when disconnected
+	runner          *runner // set while Run is active
 	clientID        string
 	username        string
 	password        []byte
@@ -106,16 +107,37 @@ func (c *Client) IsConnected() bool {
 // OnDisconnect follows.
 //
 // Connect does not reconnect after the connection is lost; OnDisconnect
-// reports the loss and Connect may be called again.
+// reports the loss and Connect may be called again. Use Run for a
+// connection that is kept up automatically.
 func (c *Client) Connect(ctx context.Context) (ConnAck, error) {
+	c.mu.Lock()
+	running := c.runner != nil
+	c.mu.Unlock()
+	if running {
+		return ConnAck{}, ErrRunning
+	}
+	ack, _, err := c.connect(ctx, true)
+	return ack, err
+}
+
+// connect makes one connection attempt and returns the connection on
+// success. resetRetain assumes the server supports retain again, as
+// mosquitto_connect does; mosquitto_reconnect keeps the last CONNACK's
+// value, which decides whether the Will is sent with retain.
+func (c *Client) connect(ctx context.Context, resetRetain bool) (ConnAck, *conn, error) {
+	ctx, abort := context.WithCancel(ctx)
+	defer abort()
 	c.mu.Lock()
 	if c.cn != nil {
 		c.mu.Unlock()
-		return ConnAck{}, ErrAlreadyConnected
+		return ConnAck{}, nil, ErrAlreadyConnected
 	}
 	cn := newConn(c)
+	cn.abort = abort
 	c.cn = cn
-	c.retainAvailable = true
+	if resetRetain {
+		c.retainAvailable = true
+	}
 	c.mu.Unlock()
 
 	if c.h.OnPreConnect != nil {
@@ -127,7 +149,10 @@ func (c *Client) Connect(ctx context.Context) (ConnAck, error) {
 		c.mu.Lock()
 		c.cn = nil
 		c.mu.Unlock()
-		return ConnAck{}, fmt.Errorf("mqttclient: connect to %s: %w", c.srv.addr, err)
+		if cn.userDisconnect.Load() {
+			return ConnAck{}, nil, ErrDisconnected
+		}
+		return ConnAck{}, nil, fmt.Errorf("mqttclient: connect to %s: %w", c.srv.addr, err)
 	}
 
 	c.mu.Lock()
@@ -155,33 +180,49 @@ func (c *Client) Connect(ctx context.Context) (ConnAck, error) {
 	if cn.userDisconnect.Load() {
 		cn.close(nil)
 		<-cn.finished
-		return ConnAck{}, ErrDisconnected
+		return ConnAck{}, nil, ErrDisconnected
 	}
 
 	c.log.Debug("sending CONNECT", "client_id", pk.Connect.ClientIdentifier)
 	deadline, _ := ctx.Deadline()
 	if err := cn.write(&pk, deadline); err != nil {
 		<-cn.finished
-		return ConnAck{}, cn.connectErr()
+		return ConnAck{}, nil, cn.connectErr()
 	}
 
 	select {
 	case r := <-cn.connack:
 		if r.err != nil {
 			<-cn.finished
+			return r.ack, nil, r.err
 		}
-		return r.ack, r.err
+		return r.ack, cn, nil
 	case <-cn.finished:
 		select {
 		case r := <-cn.connack:
-			return r.ack, r.err
+			if r.err != nil {
+				return r.ack, nil, r.err
+			}
+			return r.ack, cn, nil
 		default:
-			return ConnAck{}, cn.connectErr()
+			return ConnAck{}, nil, cn.connectErr()
 		}
 	case <-ctx.Done():
+		// An accepted connection is returned rather than dropped, so that
+		// the caller (Run) can close it with DISCONNECT and no Will.
+		select {
+		case r := <-cn.connack:
+			if r.err == nil {
+				return r.ack, cn, nil
+			}
+		default:
+		}
 		cn.close(ctx.Err())
 		<-cn.finished
-		return ConnAck{}, ctx.Err()
+		if cn.userDisconnect.Load() {
+			return ConnAck{}, nil, ErrDisconnected
+		}
+		return ConnAck{}, nil, ctx.Err()
 	}
 }
 
@@ -189,20 +230,36 @@ func (c *Client) Connect(ctx context.Context) (ConnAck, error) {
 // properties, closes the connection and waits for it to shut down
 // (mosquitto_disconnect_v5). For MQTT 3.x, reason must be 0 and props nil.
 // OnDisconnect is called with a nil Err.
+//
+// With Run, Disconnect also stops Run, which returns nil; it does not wait
+// for Run to return. Between connections, Disconnect only stops Run.
 func (c *Client) Disconnect(ctx context.Context, reason byte, props *Properties) error {
 	if c.opts.ProtocolVersion != MQTT5 && (reason != 0 || props != nil) {
 		return fmt.Errorf("%w: DISCONNECT reason code and properties require MQTT 5", ErrNotSupported)
 	}
 	c.mu.Lock()
-	cn := c.cn
+	cn, r := c.cn, c.runner
 	c.mu.Unlock()
+	if r != nil {
+		r.requestStop()
+	}
+	noConn := ErrNoConn
+	if r != nil {
+		noConn = nil // stopping Run is all there is to do
+	}
 	if cn == nil {
-		return ErrNoConn
+		return noConn
 	}
 	cn.userDisconnect.Store(true)
 	if !cn.started.Load() {
-		return ErrNoConn // Connect is still dialling; it will see userDisconnect.
+		cn.abort() // connect is still dialling; it returns ErrDisconnected
+		return noConn
 	}
+	return c.disconnect(ctx, cn, reason, props)
+}
+
+func (c *Client) disconnect(ctx context.Context, cn *conn, reason byte, props *Properties) error {
+	cn.userDisconnect.Store(true)
 
 	pk := newDisconnect(c.opts.ProtocolVersion, reason, props)
 	deadline, _ := ctx.Deadline()

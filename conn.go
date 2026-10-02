@@ -2,6 +2,7 @@ package mqttclient
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -21,7 +22,8 @@ type conn struct {
 	nc      net.Conn
 	br      *bufio.Reader
 	wmu     sync.Mutex
-	maxIn   uint32 // Maximum Packet Size sent in CONNECT; 0 means no limit
+	maxIn   uint32             // Maximum Packet Size sent in CONNECT; 0 means no limit
+	abort   context.CancelFunc // cancels the connection attempt (Disconnect while dialling)
 
 	started        atomic.Bool
 	active         atomic.Bool // CONNACK accepted (mosq_cs_active)

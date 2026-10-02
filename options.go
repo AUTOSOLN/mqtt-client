@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/wind-c/comqtt/v2/mqtt/packets"
@@ -92,6 +93,20 @@ type Options struct {
 	// Messages beyond the limit are queued. Zero means DefaultMaxInflight.
 	MaxInflight uint16
 
+	// ReconnectDelay, ReconnectDelayMax and ReconnectExponential set how
+	// long Run waits before connecting again (mosquitto_reconnect_delay_set).
+	// The n-th consecutive wait (n from 0) is ReconnectDelay*(n+1), or
+	// ReconnectDelay*(n+1)*(n+1) with ReconnectExponential, capped at
+	// ReconnectDelayMax. A successful CONNACK resets n. Zero values mean 1s
+	// and ReconnectDelay, libmosquitto's defaults: a fixed 1s.
+	ReconnectDelay       time.Duration
+	ReconnectDelayMax    time.Duration
+	ReconnectExponential bool
+
+	// ConnectTimeout bounds each of Run's connection attempts, from dialling
+	// to CONNACK. Zero means 30s.
+	ConnectTimeout time.Duration
+
 	// TLSConfig is used for mqtts/ssl/tls servers. If nil, a default
 	// configuration with ServerName set from the URL host is used.
 	TLSConfig *tls.Config
@@ -118,6 +133,12 @@ type Handlers struct {
 	// OnDisconnect is called once for every network connection that was
 	// established, after it has closed.
 	OnDisconnect func(c *Client, ev DisconnectEvent)
+
+	// OnConnectError is called by Run for every connection attempt that
+	// fails: the network connection, the TLS handshake, CONNACK not
+	// arriving within ConnectTimeout, or a refusal (which OnConnect and
+	// OnDisconnect also report).
+	OnConnectError func(c *Client, err error)
 
 	// OnMessage is called for every message received from the server: QoS 0
 	// and 1 on arrival (after PUBACK is sent), QoS 2 when PUBREL arrives
@@ -228,6 +249,23 @@ func (o *Options) validate() error {
 	}
 	if o.MaxInflight == 0 {
 		o.MaxInflight = DefaultMaxInflight
+	}
+	return o.validateRun()
+}
+
+// validateRun checks and defaults the options used by Run.
+func (o *Options) validateRun() error {
+	if o.ReconnectDelay < 0 || o.ReconnectDelayMax < 0 || o.ConnectTimeout < 0 {
+		return fmt.Errorf("%w: negative reconnect delay or connect timeout", ErrInvalid)
+	}
+	if o.ReconnectDelay == 0 {
+		o.ReconnectDelay = time.Second
+	}
+	if o.ReconnectDelayMax == 0 {
+		o.ReconnectDelayMax = o.ReconnectDelay
+	}
+	if o.ConnectTimeout == 0 {
+		o.ConnectTimeout = 30 * time.Second
 	}
 	return nil
 }

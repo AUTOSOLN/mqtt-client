@@ -61,6 +61,17 @@ func (b *fakeBroker) accept() *fakeConn {
 	}
 }
 
+// tryAccept waits up to d for a connection.
+func (b *fakeBroker) tryAccept(d time.Duration) (net.Conn, error) {
+	_ = b.ln.(*net.TCPListener).SetDeadline(time.Now().Add(d))
+	defer b.ln.(*net.TCPListener).SetDeadline(time.Time{})
+	nc, err := b.ln.Accept()
+	if err == nil {
+		b.t.Cleanup(func() { nc.Close() })
+	}
+	return nc, err
+}
+
 // readRaw reads one packet and returns its bytes, or fails the test.
 func (f *fakeConn) readRaw() []byte {
 	f.t.Helper()

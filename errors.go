@@ -21,6 +21,7 @@ var (
 	ErrDisconnected     = errors.New("mqttclient: disconnected by the application")
 	ErrQoSNotSupported  = errors.New("mqttclient: qos not supported by the server") // MOSQ_ERR_QOS_NOT_SUPPORTED
 	ErrNoMid            = errors.New("mqttclient: all message ids are in use")
+	ErrRunning          = errors.New("mqttclient: Run is managing the connection")
 )
 
 // ReasonCodeError is returned by Pending.Wait when the server answers with an
