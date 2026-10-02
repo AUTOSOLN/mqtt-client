@@ -3,12 +3,15 @@ package mqttclient
 import (
 	"context"
 	"fmt"
+
+	"github.com/wind-c/comqtt/v2/mqtt/packets"
 )
 
 // maxPayload is the largest payload a PUBLISH can carry (MQTT_MAX_PAYLOAD).
 const maxPayload = 268435455
 
-// Pending tracks a message from Publish until it is complete.
+// Pending tracks a request (Publish, Subscribe or Unsubscribe) until it is
+// complete.
 type Pending struct {
 	Mid uint16
 
@@ -17,10 +20,17 @@ type Pending struct {
 	err  error
 }
 
-// Result is the server's answer to a published message.
+// Result is the server's answer to a request.
 type Result struct {
-	ReasonCode byte        // reason code of the final acknowledgement (MQTT 5); 0 for QoS 0
-	Properties *Properties // properties of the final acknowledgement (MQTT 5)
+	// ReasonCode is the reason code of a publish's final acknowledgement
+	// (MQTT 5); 0 for QoS 0.
+	ReasonCode byte
+
+	// ReasonCodes has one entry per topic filter of a Subscribe (the granted
+	// QoS, or a failure code of 0x80 or above) or an Unsubscribe.
+	ReasonCodes []byte
+
+	Properties *Properties // properties of the acknowledgement (MQTT 5)
 }
 
 func newPending(mid uint16) *Pending {
@@ -35,10 +45,13 @@ func (p *Pending) complete(res Result, err error) {
 // Done is closed when the message is complete.
 func (p *Pending) Done() <-chan struct{} { return p.done }
 
-// Wait blocks until the message is complete or ctx ends. It returns a
-// *ReasonCodeError if the server refused the message (MQTT 5 reason code
-// 0x80 or above). A ctx error does not cancel the message: it stays queued
-// and is still sent and resent on later connections.
+// Wait blocks until the request is complete or ctx ends. It returns a
+// *ReasonCodeError, with the Result, if the server refused the message or
+// a topic filter (reason code 0x80 or above; for several filters, the first
+// refused one). A ctx error does not cancel the request: a published
+// message stays queued and is still sent and resent on later connections.
+// A Subscribe or Unsubscribe fails with the connection's error if the
+// connection closes before the acknowledgement.
 func (p *Pending) Wait(ctx context.Context) (Result, error) {
 	select {
 	case <-p.done:
@@ -76,7 +89,10 @@ func (c *Client) Publish(ctx context.Context, m *Message) (*Pending, error) {
 	if msg.QoS > s.maxQoS {
 		return nil, fmt.Errorf("%w: qos %d, server maximum %d", ErrQoSNotSupported, msg.QoS, s.maxQoS)
 	}
-	if err := s.checkSize(c.opts.ProtocolVersion, &msg); err != nil {
+	probe := msg
+	probe.Mid = 1 // only its presence matters for the size
+	probePk := newPublish(c.opts.ProtocolVersion, &probe, false)
+	if err := s.checkSize(&probePk); err != nil {
 		return nil, err
 	}
 	if msg.QoS == 0 && s.cn == nil {
@@ -144,26 +160,29 @@ func (c *Client) checkPublish(m *Message) error {
 		if len(p.SubscriptionIdentifier) > 0 {
 			return fmt.Errorf("%w: a client may not send a subscription identifier", ErrInvalid)
 		}
+		if p.ResponseTopic != "" {
+			// The codec would silently drop an invalid one.
+			if err := checkPublishTopic(p.ResponseTopic); err != nil {
+				return fmt.Errorf("%w: response topic: %v", ErrInvalid, err)
+			}
+		}
 	}
 	return nil
 }
 
-// checkSize rejects a PUBLISH larger than the server's Maximum Packet Size,
-// counting the whole packet as MQTT 5 §3.2.2.3.6 defines it. s.mu must be
-// held.
-func (s *session) checkSize(version byte, m *Message) error {
+// checkSize rejects a packet larger than the server's Maximum Packet Size,
+// counting the whole packet as MQTT 5 §3.2.2.3.6 defines it. The packet
+// identifier only needs to be non-zero. s.mu must be held.
+func (s *session) checkSize(pk *packets.Packet) error {
 	if s.maxPacketSize == 0 {
 		return nil
 	}
-	probe := *m
-	probe.Mid = 1 // only its presence matters for the size
-	pk := newPublish(version, &probe, false)
-	b, err := encodePacket(&pk)
+	b, err := encodePacket(pk)
 	if err != nil {
 		return err
 	}
 	if uint64(len(b)) > uint64(s.maxPacketSize) {
-		return fmt.Errorf("%w: PUBLISH of %d bytes, server maximum %d", ErrOversizePacket, len(b), s.maxPacketSize)
+		return fmt.Errorf("%w: %s of %d bytes, server maximum %d", ErrOversizePacket, packetName(pk.FixedHeader.Type), len(b), s.maxPacketSize)
 	}
 	return nil
 }

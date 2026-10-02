@@ -3,9 +3,8 @@
 // complete, optionally stays connected to print messages the broker sends,
 // then disconnects.
 //
-// The client cannot subscribe yet (phase 3). Messages arrive anyway when
-// the client resumes a persistent session that has subscriptions, for
-// example one created with mosquitto_sub -c; see README.md.
+// It does not subscribe (mqttsub does), but messages arrive when it resumes
+// a persistent session that has subscriptions; see README.md.
 //
 // Examples:
 //
@@ -17,7 +16,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,7 +25,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	mqttclient "github.com/AUTOSOLN/mqtt-client"
 	"github.com/AUTOSOLN/mqtt-client/cmd/internal/cli"
@@ -52,21 +49,7 @@ type config struct {
 	responseTopic string
 	correlation   string
 	expiry        uint
-	user          userProps
-}
-
-// userProps collects repeated -user key=value flags.
-type userProps []mqttclient.UserProperty
-
-func (u *userProps) String() string { return fmt.Sprint(*u) }
-
-func (u *userProps) Set(s string) error {
-	k, v, ok := strings.Cut(s, "=")
-	if !ok {
-		return errors.New("want key=value")
-	}
-	*u = append(*u, mqttclient.UserProperty{Key: k, Val: v})
-	return nil
+	user          cli.UserProps
 }
 
 func main() {
@@ -165,7 +148,7 @@ func publish(ctx context.Context, cfg *config, props *mqttclient.Properties) err
 		OnMessage: func(_ *mqttclient.Client, m *mqttclient.Message) {
 			st.received.Add(1)
 			if !cfg.quiet {
-				cli.Logf("OnMessage %s", describe(m))
+				cli.Logf("OnMessage %s", cli.DescribeMessage(m))
 			}
 		},
 	})
@@ -264,50 +247,4 @@ func waitAll(cfg *config, s *cli.Session, pending []*mqttclient.Pending, st *sta
 		}
 	}
 	return nil
-}
-
-// describe formats a received message for printing.
-func describe(m *mqttclient.Message) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "mid=%d qos=%d retain=%v topic=%q payload=%s", m.Mid, m.QoS, m.Retain, m.Topic, showPayload(m.Payload))
-	p := m.Properties
-	if p == nil {
-		return b.String()
-	}
-	if p.PayloadFormatFlag {
-		fmt.Fprintf(&b, " payload_format=%d", p.PayloadFormat)
-	}
-	if p.MessageExpiryInterval > 0 {
-		fmt.Fprintf(&b, " expiry=%d", p.MessageExpiryInterval)
-	}
-	if p.ContentType != "" {
-		fmt.Fprintf(&b, " content_type=%q", p.ContentType)
-	}
-	if p.ResponseTopic != "" {
-		fmt.Fprintf(&b, " response_topic=%q", p.ResponseTopic)
-	}
-	if len(p.CorrelationData) > 0 {
-		fmt.Fprintf(&b, " correlation=%s", showPayload(p.CorrelationData))
-	}
-	if len(p.SubscriptionIdentifier) > 0 {
-		fmt.Fprintf(&b, " subscription_ids=%v", p.SubscriptionIdentifier)
-	}
-	for _, u := range p.User {
-		fmt.Fprintf(&b, " user[%q]=%q", u.Key, u.Val)
-	}
-	return b.String()
-}
-
-// showPayload prints text as a quoted string and anything else as hex,
-// truncated to keep lines short.
-func showPayload(b []byte) string {
-	const max = 64
-	more := ""
-	if len(b) > max {
-		b, more = b[:max], fmt.Sprintf("...(%d more bytes)", len(b)-max)
-	}
-	if utf8.Valid(b) {
-		return strconv.Quote(string(b)) + more
-	}
-	return "0x" + hex.EncodeToString(b) + more
 }

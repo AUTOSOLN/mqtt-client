@@ -301,12 +301,20 @@ func init() {
 				&mqttclient.Properties{PayloadFormat: 1})
 		},
 		"11-prop-oversize-packet": func(port int) int {
-			// The SUBSCRIBE and UNSUBSCRIBE size checks of the C program
-			// come with phase 3. The payloads are one byte shorter than in
-			// mosquitto's script: see overrides/11-prop-oversize-packet.py.
+			// The payloads are one byte shorter than in mosquitto's script:
+			// see overrides/11-prop-oversize-packet.py.
 			var sent uint16
 			return client(port, mqttclient.Options{ClientID: "publish-qos0-test", ProtocolVersion: v5}, mqttclient.Handlers{
 				OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) {
+					const long = "0123456789012345678901234567890"
+					if _, err := c.Subscribe(context.Background(), []mqttclient.Subscription{{Topic: long}}, nil); !errors.Is(err, mqttclient.ErrOversizePacket) {
+						fmt.Println("Fail on subscribe:", err)
+						os.Exit(1)
+					}
+					if _, err := c.Unsubscribe(context.Background(), []string{long}, nil); !errors.Is(err, mqttclient.ErrOversizePacket) {
+						fmt.Println("Fail on unsubscribe:", err)
+						os.Exit(1)
+					}
 					if _, err := publish(c, "pub/test", "012345678901234567", 0, nil); !errors.Is(err, mqttclient.ErrOversizePacket) {
 						fmt.Println("Fail on publish 1:", err)
 						os.Exit(1)
@@ -358,6 +366,10 @@ var scripts = map[string]string{
 	"11-prop-recv-qos2":                     "11-prop-recv",
 }
 
+// helpers are programs without a script of their own: another script runs
+// them.
+var helpers = map[string]bool{}
+
 // scriptNames lists every script the programs cover.
 func scriptNames() []string {
 	renamed := make(map[string]bool)
@@ -367,7 +379,7 @@ func scriptNames() []string {
 		names = append(names, s)
 	}
 	for prog := range cases {
-		if !renamed[prog] {
+		if !renamed[prog] && !helpers[prog] {
 			names = append(names, prog)
 		}
 	}

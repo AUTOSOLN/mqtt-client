@@ -4,9 +4,9 @@ An MQTT 3.1.1 / 5.0 client for Go, modelled on the
 [libmosquitto](https://github.com/eclipse-mosquitto/mosquitto) client API and
 built on the [comqtt](https://github.com/AUTOSOLN/comqtt) packet codec.
 
-Status: pre-alpha. Connect, keepalive, disconnect and publish (QoS 0, 1 and 2,
-both directions) work for MQTT 3.1, 3.1.1 and 5 over TCP and TLS; subscribe is
-next. See [PLAN.md](PLAN.md).
+Status: pre-alpha. Connect, keepalive, disconnect, publish (QoS 0, 1 and 2,
+both directions), subscribe and unsubscribe work for MQTT 3.1, 3.1.1 and 5 over
+TCP and TLS; automatic reconnect is next. See [PLAN.md](PLAN.md).
 
 ```go
 c, err := mqttclient.New(mqttclient.Options{
@@ -21,6 +21,10 @@ c, err := mqttclient.New(mqttclient.Options{
 	},
 	OnMessage: func(_ *mqttclient.Client, m *mqttclient.Message) {
 		log.Printf("%s: %s", m.Topic, m.Payload)
+	},
+	OnConnect: func(c *mqttclient.Client, ack mqttclient.ConnAck) {
+		// Subscriptions are not resent on a new connection: subscribe here.
+		_, _ = c.Subscribe(context.Background(), []mqttclient.Subscription{{Topic: "a/#", QoS: 1}}, nil)
 	},
 })
 if err != nil {
@@ -49,8 +53,8 @@ go test -race ./...
 ```
 
 For manual tests against a real broker, see [cmd/mqttconnect](cmd/mqttconnect)
-(connect and disconnect) and [cmd/mqttpub](cmd/mqttpub) (publish, and receive
-through a persistent session).
+(connect and disconnect), [cmd/mqttpub](cmd/mqttpub) (publish) and
+[cmd/mqttsub](cmd/mqttsub) (subscribe and unsubscribe).
 
 ## Using it
 

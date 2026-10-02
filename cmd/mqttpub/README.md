@@ -4,12 +4,14 @@ A manual test tool for publishing with `mqttclient` (phase 2). It connects, publ
 at QoS 0, 1 or 2, waits until each one is complete, and then disconnects. With `-listen` it stays
 connected and prints any messages the broker sends.
 
-The client cannot subscribe yet (that comes in phase 3), but it can still receive messages: when
-it resumes a persistent session that already has subscriptions, the broker delivers the session's
-queued and new messages. [Receiving](#receiving-messages) below shows how to set that up.
+`mqttpub` does not subscribe; [mqttsub](../mqttsub/README.md) does. `mqttpub` can still receive
+messages when it resumes a persistent session that already has subscriptions: the broker delivers
+the session's queued and new messages. [Receiving](#receiving-messages) below shows how to set
+that up, which tests publishing and receiving in one run.
 
-It uses the same connection flags as [mqttconnect](../mqttconnect/README.md). Both tools get them
-from [cmd/internal/cli](../internal/cli/cli.go).
+It uses the same connection flags as [mqttconnect](../mqttconnect/README.md) and
+[mqttsub](../mqttsub/README.md). All three tools get them from
+[cmd/internal/cli](../internal/cli/cli.go).
 
 ## Build
 
@@ -123,8 +125,9 @@ not show up with larger `-n` values.
 
 ### Receiving messages
 
-A persistent session with a subscription lets the client receive messages without subscribing
-itself.
+A persistent session with a subscription lets `mqttpub` receive messages without subscribing
+itself. In step 1, `build/mqttsub -id inbox -clean=false -t 'test/in/#' -q 2 -W 100ms` works as
+well as `mosquitto_sub`.
 
 1. Create the session. Ctrl-C (or the `timeout`) leaves the session on the broker:
 

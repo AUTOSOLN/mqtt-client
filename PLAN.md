@@ -152,7 +152,7 @@ the server, and goroutine safety. Callbacks run one at a time, in order, on a di
 the same as callbacks on mosquitto's loop thread. The dispatcher goroutine exists only while
 callbacks are queued.
 
-### Implemented (phases 1 and 2)
+### Implemented (phases 1–3)
 
 ```go
 func New(opts Options, h Handlers) (*Client, error)               // mosquitto_new + option setters
@@ -163,13 +163,24 @@ func (c *Client) SetWill(w *Message) error                                      
 func (c *Client) ClientID() string                                                    // includes a server-assigned id
 func (c *Client) IsConnected() bool
 func (c *Client) Publish(ctx context.Context, m *Message) (*Pending, error)          // mosquitto_publish_v5 (phase 2)
+func (c *Client) Subscribe(ctx context.Context, subs []Subscription, props *Properties) (*Pending, error) // phase 3
+func (c *Client) Unsubscribe(ctx context.Context, topics []string, props *Properties) (*Pending, error)   // phase 3
+
+type Subscription struct {
+    Topic             string // filter; + and # wildcards
+    QoS               byte
+    NoLocal           bool   // MQTT 5 options; ignored for 3.x, as libmosquitto does
+    RetainAsPublished bool
+    RetainHandling    byte
+}
 
 type Pending struct{ Mid uint16 /* … */ }
 func (p *Pending) Wait(ctx context.Context) (Result, error) // *ReasonCodeError for reason >= 0x80; ctx does not cancel the message
 func (p *Pending) Done() <-chan struct{}
 type Result struct {
-    ReasonCode byte        // final acknowledgement (MQTT 5); 0 for QoS 0
-    Properties *Properties
+    ReasonCode  byte        // publish: final acknowledgement (MQTT 5); 0 for QoS 0
+    ReasonCodes []byte      // subscribe/unsubscribe: one per filter (3.x UNSUBACK: all 0)
+    Properties  *Properties
 }
 
 type Message struct {
@@ -203,6 +214,8 @@ type Handlers struct {
     OnDisconnect func(c *Client, ev DisconnectEvent) // once per established connection
     OnMessage    func(c *Client, m *Message)         // QoS 0/1 on arrival (after PUBACK), QoS 2 on PUBREL (after PUBCOMP)
     OnPublish    func(c *Client, mid uint16, reason byte, props *Properties) // QoS 0 written, PUBACK, PUBCOMP, or failed PUBREC
+    OnSubscribe   func(c *Client, mid uint16, granted []byte, props *Properties) // SUBACK (phase 3)
+    OnUnsubscribe func(c *Client, mid uint16, reasons []byte, props *Properties) // UNSUBACK (phase 3)
 }
 
 type DisconnectEvent struct {
@@ -223,18 +236,19 @@ connection (`ErrNoConn`). QoS 1 and 2 messages are queued and sent while the sen
 (the server's Receive Maximum, else `MaxInflight`). They are kept across connections until
 acknowledged, so a message published while disconnected goes out after the next `Connect`.
 
+Subscribe and Unsubscribe follow `mosquitto_subscribe_multiple` and `mosquitto_unsubscribe_multiple`,
+but take options per filter. Filters are checked as `mosquitto_sub_topic_check` does, and the
+packet against the server's Maximum Packet Size. Both need a connection (`ErrNoConn`), and
+neither is queued or resent. A request still waiting for SUBACK or UNSUBACK when the connection
+closes fails with the connection's error (`ErrDisconnected` after `Disconnect`). Callers
+re-subscribe from `OnConnect`. Subscribe, Unsubscribe and Publish share one mid sequence.
+`Pending.Wait` returns a `*ReasonCodeError` for the first refused filter, together with the
+`Result` holding every code.
+
 ### Still to come
 
 ```go
-// Handlers additions
-OnSubscribe   func(c *Client, mid uint16, granted []byte, props *Properties) // phase 3
-OnUnsubscribe func(c *Client, mid uint16, reasons []byte, props *Properties) // phase 3
-
-func (c *Client) Subscribe(ctx context.Context, subs []Subscription, props *Properties) (*Pending, error) // phase 3
-func (c *Client) Unsubscribe(ctx context.Context, topics []string, props *Properties) (*Pending, error)   // phase 3
 func (c *Client) Start(ctx context.Context) error   // phase 4: connect_async + loop_forever semantics (reconnect)
-
-// Result additions (phase 3): granted QoS / reason codes per topic for SUBACK and UNSUBACK
 
 // Options additions (phase 4): ReconnectDelay, ReconnectDelayMax, ReconnectExponential
 ```
@@ -267,6 +281,8 @@ Files at the repository root (✓ = exists):
   reset and resend (`messages_mosq.c`). The session lives on the `Client`, so it outlives each
   connection.
 - ✓ `publish.go`: `Publish`, `Pending`, argument and size checks (`actions_publish.c`)
+- ✓ `subscribe.go`: `Subscribe`, `Unsubscribe`, their checks (`actions_subscribe.c`,
+  `actions_unsubscribe.c`) and the SUBACK/UNSUBACK handler (`handle_suback.c`, `handle_unsuback.c`)
 - ✓ `handle.go`: PUBLISH, PUBACK, PUBREC, PUBREL and PUBCOMP handlers (the `handle_*.c`
   equivalents), including unexpected acknowledgements
 - ✓ `dispatch.go`: the callback dispatcher
@@ -353,7 +369,7 @@ the UI.
 | 0 | **Done.** Repository, LICENSE, README; comqtt gap #1 fixed on branch `BB-724` (`5268a06`, not yet merged to main); `go.upstream.mod`; CI workflow (tests with both modfiles, mosquitto conformance) | `go vet`, `go test -race` pass with both modfiles |
 | 1 | **Done.** Dial (tcp, tls), CONNECT/CONNACK, keepalive, PINGREQ/PINGRESP both ways, DISCONNECT both ways, protocol-error DISCONNECT, v3.1, v3.1.1 and v5 | all 12 non-auth `01-*` conformance cases pass; unit tests with a scripted broker pass 20× under `-race` |
 | 2 | **Done.** PUBLISH out and in at QoS 0/1/2, mid allocator, inflight queue, receive maximum both ways, max packet size, resend after reconnect, `Pending.Wait`; `cmd/mqttpub` test tool | 19 of the 22 `03-*` scripts and all 6 `11-*` scripts pass (37 conformance cases in total; `11-prop-oversize-packet` with an override); the other three `03-*` scripts subscribe, so they move to phase 3; unit tests pass 20× under `-race` |
-| 3 | SUBSCRIBE and UNSUBSCRIBE (multiple, v5 options and properties), `Pending` for SUBACK/UNSUBACK, the SUBSCRIBE/UNSUBSCRIBE size checks of `11-prop-oversize-packet` | `02-*`, `03-publish-loop`, `03-request-response*` pass |
+| 3 | **Done.** SUBSCRIBE and UNSUBSCRIBE (multiple, v5 options and properties), `Pending` for SUBACK/UNSUBACK, the SUBSCRIBE/UNSUBSCRIBE size checks of `11-prop-oversize-packet`; `cmd/mqttsub` test tool | all 7 `02-*` scripts, and now all 22 `03-*` scripts, pass (47 conformance cases in total); unit tests pass 20× under `-race` |
 | 4 | Supervisor: reconnect backoff, session resumption, `OnConnect` re-subscribe pattern | `01-no-clean-session` and `03-*-disconnect` still pass with the supervisor instead of the ports' manual `Connect`; integration tests that kill the broker pass |
 | 5 | **Swap swarmy over:** add the `require` and the comqtt `replace` (see Module wiring), replace autopaho in `main.go`, add `ProtocolVersion` to `ConnectionItem` and the UI, remove paho from `go.mod` and run `go mod tidy` | parity checklist done; manual run against mosquitto and comqtt brokers; tag `v0.1.0` |
 | 6 | **Broker adoption:** reimplement `libs/mqtt-client`'s `MQTTClient` interface (V3 and V5) on this module, then move `tests/broker-throughput`, `tests/functional` and `tests/sparkplug-client` over | those test tools run unchanged; paho removed from `libs/mqtt-client` |
@@ -378,6 +394,8 @@ almost all of it in `connectOne`, `buildConnConfig`, `onConnectionUp`, `onPublis
 | DUP after reconnect | set on every message released after a reconnect, even ones never sent | set only on messages sent before | [MQTT-3.3.1-1]: DUP marks a re-delivery. |
 | Inbound QoS 2 store when CONNACK Session Present = 0 | kept; each one still uses up receive quota | dropped | Their PUBREL can never come. With mosquitto, the stale entries use up Receive Maximum. |
 | Too many inbound QoS 1/2 messages (MQTT 5) | protocol error, so DISCONNECT 0x82 | DISCONNECT 0x93 (Receive Maximum exceeded) | The spec's reason code; mosquitto has a FIXME for it. |
+| SUBACK or UNSUBACK for an unknown mid | calls `on_subscribe` / `on_unsubscribe` anyway | ignored (debug log); one for a request of the other kind is a protocol error | The client tracks each request so that `Pending` can complete. |
+| MQTT 3.x UNSUBACK | `on_unsubscribe` gets no reason codes | `OnUnsubscribe` and `Result` get one 0 (success) per filter | Codec gap 9; callers see the same shape for both versions. |
 
 ## Risks
 

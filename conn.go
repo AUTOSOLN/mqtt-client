@@ -208,7 +208,11 @@ func (cn *conn) finish() {
 	<-cn.kaDone
 
 	c := cn.c
-	c.sess.disconnected(cn)
+	cause := cn.cause
+	if cn.userDisconnect.Load() {
+		cause = ErrDisconnected
+	}
+	c.sess.disconnected(cn, cause)
 	c.mu.Lock()
 	if c.cn == cn {
 		c.cn = nil
@@ -252,6 +256,8 @@ func (cn *conn) handle(pk *packets.Packet) error {
 		return cn.handlePubrel(pk)
 	case packets.Pubcomp:
 		return cn.handlePubcomp(pk)
+	case packets.Suback, packets.Unsuback:
+		return cn.handleSubUnsuback(pk)
 	default:
 		return fmt.Errorf("%w: %s is not handled yet", ErrProtocol, packetName(t))
 	}

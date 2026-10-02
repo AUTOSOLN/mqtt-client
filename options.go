@@ -129,6 +129,14 @@ type Handlers struct {
 	// PUBREC with a failure reason code (MQTT 5). reason and props are the
 	// acknowledgement's reason code and properties.
 	OnPublish func(c *Client, mid uint16, reason byte, props *Properties)
+
+	// OnSubscribe is called when SUBACK arrives, with one granted QoS or
+	// reason code per topic filter, in request order.
+	OnSubscribe func(c *Client, mid uint16, granted []byte, props *Properties)
+
+	// OnUnsubscribe is called when UNSUBACK arrives, with one reason code per
+	// topic filter. MQTT 3.x has no reason codes, so they are all 0 (success).
+	OnUnsubscribe func(c *Client, mid uint16, reasons []byte, props *Properties)
 }
 
 // ConnAck describes a received CONNACK.
@@ -282,6 +290,27 @@ func checkPublishTopic(topic string) error {
 	}
 	if strings.ContainsAny(topic, "+#") {
 		return fmt.Errorf("wildcards are not allowed in a topic name")
+	}
+	return nil
+}
+
+// checkSubscribeTopic is mosquitto_sub_topic_check: non-empty, valid UTF-8
+// string, and wildcards that fill a whole level, with '#' only last.
+func checkSubscribeTopic(filter string) error {
+	if filter == "" {
+		return fmt.Errorf("empty topic filter")
+	}
+	if err := checkUTF8String(filter); err != nil {
+		return err
+	}
+	levels := strings.Split(filter, "/")
+	for i, l := range levels {
+		if strings.Contains(l, "+") && l != "+" {
+			return fmt.Errorf("'+' must be a whole topic level")
+		}
+		if strings.Contains(l, "#") && (l != "#" || i != len(levels)-1) {
+			return fmt.Errorf("'#' must be the whole last topic level")
+		}
 	}
 	return nil
 }

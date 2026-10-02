@@ -27,6 +27,13 @@ const (
 // inFlight reports whether the message counts against the send quota.
 func (s outState) inFlight() bool { return s >= outWaitPuback }
 
+// ackWait is a SUBSCRIBE or UNSUBSCRIBE waiting for its acknowledgement.
+type ackWait struct {
+	typ byte // packets.Suback or packets.Unsuback
+	n   int  // topic filters in the request
+	p   *Pending
+}
+
 type outMsg struct {
 	m     Message // owned copy; m.Mid is set
 	state outState
@@ -47,6 +54,10 @@ type session struct {
 	// in holds inbound QoS 2 messages waiting for PUBREL.
 	in map[uint16]*Message
 
+	// acks holds SUBSCRIBE and UNSUBSCRIBE requests waiting for SUBACK or
+	// UNSUBACK on the current connection.
+	acks map[uint16]*ackWait
+
 	// Set from each CONNACK.
 	cn            *conn  // accepted connection, nil when there is none
 	sendQuota     uint16 // more QoS 1/2 PUBLISH packets that may be in flight
@@ -60,6 +71,7 @@ type session struct {
 func (s *session) init() {
 	s.outByMid = make(map[uint16]*outMsg)
 	s.in = make(map[uint16]*Message)
+	s.acks = make(map[uint16]*ackWait)
 	s.maxQoS = 2
 }
 
@@ -71,7 +83,9 @@ func (s *session) nextMid() (uint16, error) {
 		if s.lastMid == 0 {
 			s.lastMid = 1
 		}
-		if _, used := s.outByMid[s.lastMid]; !used {
+		_, msgUsed := s.outByMid[s.lastMid]
+		_, ackUsed := s.acks[s.lastMid]
+		if !msgUsed && !ackUsed {
 			return s.lastMid, nil
 		}
 	}
@@ -148,14 +162,19 @@ func (s *session) connected(cn *conn, sendMax uint16, props *Properties, session
 }
 
 // disconnected rewinds in-flight messages so that the next connection sends
-// them again: PUBLISH (with DUP) or PUBREL.
-func (s *session) disconnected(cn *conn) {
+// them again: PUBLISH (with DUP) or PUBREL. SUBSCRIBE and UNSUBSCRIBE are not
+// resent, as in libmosquitto: their Pendings fail with cause.
+func (s *session) disconnected(cn *conn, cause error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cn != cn {
 		return
 	}
 	s.cn = nil
+	for mid, a := range s.acks {
+		a.p.complete(Result{}, cause)
+		delete(s.acks, mid)
+	}
 	for _, om := range s.out {
 		switch om.state {
 		case outWaitPuback, outWaitPubrec:
