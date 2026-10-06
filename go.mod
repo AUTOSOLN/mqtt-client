@@ -4,4 +4,6 @@ go 1.25.5
 
 require github.com/wind-c/comqtt/v2 v2.6.1
 
+require gopkg.in/yaml.v3 v3.0.1
+
 replace github.com/wind-c/comqtt/v2 => github.com/AUTOSOLN/comqtt/v2 v2.6.2-0.20261002195201-5268a0644cd6

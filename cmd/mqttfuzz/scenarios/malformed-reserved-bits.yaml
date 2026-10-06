@@ -1,0 +1,24 @@
+# Malformed framing probes. These use `flags:` to set the fixed-header low
+# nibble to illegal values, and `raw:` to send arbitrary bytes. A hardened
+# broker must reject each with a close (MQTT 5 may precede it with a
+# DISCONNECT carrying 0x81 Malformed Packet).
+version: 5
+vars:
+  id: fuzz-malformed-${rand}
+steps:
+  - type: connect
+    client-id: "${id}"
+    clean: true
+    keepalive: 30
+  - type: recv
+    expect: connack
+
+  # PUBLISH with QoS 3 (bits 1-2 of the flags nibble = 0b11), which is not a
+  # valid QoS value [MQTT-3.3.1-4].
+  - label: PUBLISH with QoS 3
+    type: publish
+    topic: fuzz/badqos
+    payload: x
+    flags: 0x6 # 0b0110 -> qos=3
+  - type: expect-close
+    timeout: 3s

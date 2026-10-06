@@ -1,0 +1,21 @@
+# Two CONNECT packets on one connection. The second CONNECT is a protocol
+# violation [MQTT-3.1.0-2]; the broker must close the connection. The first
+# CONNECT should still be answered with CONNACK before the violation is seen.
+version: 5
+vars:
+  id: fuzz-dbl-${rand}
+steps:
+  - type: connect
+    client-id: "${id}"
+    clean: true
+    keepalive: 30
+  - type: recv
+    expect: connack
+
+  - label: second CONNECT on the same connection
+    type: connect
+    client-id: "${id}"
+    clean: true
+    keepalive: 30
+  - type: expect-close
+    timeout: 3s

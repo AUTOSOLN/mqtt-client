@@ -1,0 +1,14 @@
+# PUBLISH sent before CONNECT. Like any non-CONNECT first packet this is a
+# protocol violation [MQTT-3.1.0-1]; the broker must close the connection
+# without publishing the message.
+version: 311
+vars:
+  topic: fuzz/early/publish
+steps:
+  - label: publish before connecting
+    type: publish
+    topic: "${topic}"
+    payload: "should never be delivered"
+    qos: 0
+  - type: expect-close
+    timeout: 3s

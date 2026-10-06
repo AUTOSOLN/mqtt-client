@@ -1,0 +1,26 @@
+# UNSUBSCRIBE for a filter that was never subscribed to on this connection.
+# The spec allows this: the broker MUST still answer with UNSUBACK
+# [MQTT-3.10.4-5]. In MQTT 5 the reason code is typically 0x11 (No
+# subscription existed), though some brokers return 0x00 (Success).
+version: 5
+vars:
+  id: fuzz-unsub-${rand}
+  topic: fuzz/never/subscribed
+steps:
+  - type: connect
+    client-id: "${id}"
+    clean: true
+    keepalive: 30
+  - type: recv
+    expect: connack
+
+  - label: unsubscribe a filter we never subscribed to
+    type: unsubscribe
+    packet-id: 1
+    filters:
+      - "${topic}"
+  - type: recv
+    expect: unsuback
+
+  - type: disconnect
+    reason: 0

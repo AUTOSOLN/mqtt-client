@@ -1,0 +1,11 @@
+# DISCONNECT sent as the first packet, with no CONNECT.
+# This is a protocol violation: the first packet from a client MUST be CONNECT
+# [MQTT-3.1.0-1]. A hardened broker must drop the connection and must not
+# process the DISCONNECT. We expect the connection to close.
+version: 5
+steps:
+  - label: send DISCONNECT as the very first packet
+    type: disconnect
+    reason: 0
+  - type: expect-close
+    timeout: 3s
