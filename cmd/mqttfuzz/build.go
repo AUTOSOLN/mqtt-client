@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/AUTOSOLN/mqtt-client/cmd/internal/cli"
 	"github.com/wind-c/comqtt/v2/mqtt/packets"
 )
 
@@ -80,7 +81,10 @@ func encodeStep(s *Step, version byte) ([]byte, error) {
 		err = pk.ConnackEncode(&buf)
 	case packets.Publish:
 		pk.TopicName = s.Topic
-		pk.Payload = []byte(s.Payload)
+		pk.Payload, err = publishPayload(s)
+		if err != nil {
+			return nil, err
+		}
 		pk.PacketID = s.PacketID
 		if s.Flags == nil {
 			pk.FixedHeader.Qos = s.QoS
@@ -138,6 +142,22 @@ func encodeStep(s *Step, version byte) ([]byte, error) {
 		b[0] = (b[0] & 0xF0) | (*s.Flags & 0x0F)
 	}
 	return b, nil
+}
+
+// publishPayload is the step's payload, or payload-size bytes of
+// payload-pattern (default ascii) when either is set.
+func publishPayload(s *Step) ([]byte, error) {
+	if s.PayloadPattern == "" && s.PayloadSize == 0 {
+		return []byte(s.Payload), nil
+	}
+	if s.Payload != "" {
+		return nil, fmt.Errorf("give payload or payload-size/payload-pattern, not both")
+	}
+	pattern := s.PayloadPattern
+	if pattern == "" {
+		pattern = "ascii"
+	}
+	return cli.MakePattern(pattern, s.PayloadSize)
 }
 
 func applyConnect(pk *packets.Packet, s *Step, version byte) {

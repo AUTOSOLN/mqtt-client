@@ -92,7 +92,7 @@ Packet steps encode and send one control packet:
 | Type | Key fields |
 |---|---|
 | `connect` | `client-id`, `clean`, `keepalive`, `username`, `password`, `protocol-name`, `will-topic`/`will-payload`/`will-qos`/`will-retain`, `properties` |
-| `publish` | `topic`, `payload`, `qos`, `retain`, `dup`, `packet-id`, `properties` |
+| `publish` | `topic`, `payload` or `payload-size`/`payload-pattern`, `qos`, `retain`, `dup`, `packet-id`, `properties` |
 | `subscribe` | `packet-id`, `filters`, `properties` |
 | `unsubscribe` | `packet-id`, `filters` (filter strings) |
 | `puback`/`pubrec`/`pubrel`/`pubcomp` | `packet-id`, `reason` |
@@ -108,10 +108,14 @@ Control steps drive the harness:
 
 | Type | Fields | Behaviour |
 |---|---|---|
-| `recv` | `timeout`, `count`, `expect` | Read `count` packets (default 1); log them. `expect` may be a packet type name, `close`, or `none` (silence). |
+| `recv` | `timeout`, `count`, `expect`, `payload-pattern`, `payload-size` | Read `count` packets (default 1); log them. `expect` may be a packet type name, `close`, or `none` (silence). With `payload-pattern` or `payload-size`, every PUBLISH received must carry that pattern; `payload-size` 0 accepts any length. |
 | `expect-close` | `timeout` | Assert the server closes within the timeout, draining any packets it sends first. |
 | `sleep` | `duration` | Pause. |
 | `raw` | `hex` | Send arbitrary bytes (whitespace and `:` ignored) — for framing that no encoder would produce. |
+
+Generated payloads: `payload-size: N` sends N bytes of `payload-pattern`
+(`ascii`, the default, `alpha`, `01` or `binary`; the same patterns as
+`mqttpub -pattern`), in place of `payload`.
 
 Every step also accepts `label` (shown in the log), `delay` (pause before the
 step), and `flags` (0–15: replaces the fixed-header low nibble after encoding,
@@ -132,12 +136,16 @@ The `scenarios/` directory holds ready-to-run cases:
 | `publish-before-connect.yaml` | PUBLISH before CONNECT; expects close (violation) |
 | `double-connect.yaml` | Second CONNECT on one connection; expects close (violation) |
 | `malformed-reserved-bits.yaml` | PUBLISH with QoS 3; expects close / DISCONNECT 0x81 |
+| `large-publish.yaml` | Sparkplug-shaped 3.1.1 QoS 0 PUBLISH of `size` bytes (default 256 KiB of `binary`), received back and checked byte for byte; fails on a drop, a close or a damaged payload |
 
 ```sh
 build/mqttfuzz -f cmd/mqttfuzz/scenarios/unsubscribe-without-subscribe.yaml
 build/mqttfuzz -f cmd/mqttfuzz/scenarios/disconnect-before-connect.yaml
 build/mqttfuzz -f cmd/mqttfuzz/scenarios/double-connect.yaml -set id=probe-$$
+build/mqttfuzz -f cmd/mqttfuzz/scenarios/large-publish.yaml -set size=1048576 -set pattern=ascii
 ```
+
+To find a broker's size limit, sweep `size` (the scenario's header has a loop).
 
 ## Reading the output
 

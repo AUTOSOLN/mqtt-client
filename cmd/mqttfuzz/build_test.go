@@ -108,3 +108,19 @@ func TestExampleScenariosParse(t *testing.T) {
 }
 
 func TestMain(m *testing.M) { os.Exit(m.Run()) }
+
+func TestPublishPayloadPattern(t *testing.T) {
+	b, err := publishPayload(&Step{PayloadSize: 200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) != 200 || b[0] != ' ' || b[94] != '~' || b[95] != ' ' {
+		t.Fatalf("ascii payload = %q", b)
+	}
+	if _, err := publishPayload(&Step{Payload: "x", PayloadSize: 1}); err == nil {
+		t.Fatal("expected an error for payload with payload-size")
+	}
+	if _, err := publishPayload(&Step{PayloadPattern: "nope", PayloadSize: 1}); err == nil {
+		t.Fatal("expected an error for an unknown pattern")
+	}
+}

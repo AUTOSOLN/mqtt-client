@@ -1,0 +1,48 @@
+# A large PUBLISH shaped like Sparkplug B traffic (MQTT 3.1.1, QoS 0, an
+# NDEATH will, spBv1.0 topic) that the client subscribes to and receives back
+# on the same connection, checking every payload byte. A broker that enforces
+# a packet size limit fails it one of three ways: silence (dropped, recv
+# times out), a close (it hung up on the client), or a payload that fails
+# verification (truncated or corrupted).
+#
+# Find the limit by sweeping the size:
+#
+#   for kb in 64 128 256 512 1024 2048; do
+#     build/mqttfuzz -f cmd/mqttfuzz/scenarios/large-publish.yaml -set size=$((kb*1024)) >/dev/null 2>&1 \
+#       && echo "$kb KiB ok" || echo "$kb KiB FAILED"
+#   done
+version: 311
+vars:
+  id: fuzz-${rand}
+  group: fuzz
+  node: node-${rand}
+  topic: spBv1.0/${group}/DBIRTH/${node}/device1
+  size: 262144
+  pattern: binary   # ascii, alpha, 01 or binary (not UTF-8, like Sparkplug protobuf)
+steps:
+  - type: connect
+    client-id: "${id}"
+    clean: true
+    keepalive: 60
+    will-topic: spBv1.0/${group}/NDEATH/${node}
+    will-payload: "death"
+  - type: recv
+    expect: connack
+  - type: subscribe
+    packet-id: 1
+    filters: [{filter: "${topic}", qos: 1}]
+  - type: recv
+    expect: suback
+  - label: publish ${size} bytes of ${pattern}
+    type: publish
+    topic: "${topic}"
+    payload-pattern: "${pattern}"
+    payload-size: ${size}
+    qos: 0
+  - label: receive it back and verify every byte
+    type: recv
+    expect: publish
+    payload-pattern: "${pattern}"
+    payload-size: ${size}
+    timeout: 10s
+  - type: disconnect

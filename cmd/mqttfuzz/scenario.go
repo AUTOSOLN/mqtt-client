@@ -54,6 +54,12 @@ type Step struct {
 	Retain  bool   `yaml:"retain"`
 	Dup     bool   `yaml:"dup"`
 
+	// Generated payloads, for PUBLISH instead of payload, and on recv to
+	// check every PUBLISH that arrives (payload-size 0 there accepts any
+	// length). See cli.Patterns.
+	PayloadPattern string `yaml:"payload-pattern"`
+	PayloadSize    int    `yaml:"payload-size"`
+
 	// Identified packets (PUBLISH QoS>0, PUBACK/REC/REL/COMP, SUB/UNSUB).
 	PacketID uint16 `yaml:"packet-id"`
 

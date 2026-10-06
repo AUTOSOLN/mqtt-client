@@ -12,6 +12,7 @@
 //	mqttpub -v 5 -t test/a -q 2 -n 1000 -quiet
 //	mqttpub -v 5 -t test/a -content-type text/plain -user k=v -response-topic test/reply
 //	mqttpub -id inbox -clean=false -t test/a -q 2 -n 3 -listen 2s
+//	mqttpub -t test/big -size 65536 -size-step 65536 -n 16 -pattern ascii -sync
 package main
 
 import (
@@ -35,6 +36,8 @@ type config struct {
 	topic    string
 	message  string
 	size     int
+	sizeStep int
+	pattern  string
 	qos      uint
 	retain   bool
 	count    int
@@ -61,7 +64,9 @@ func run() int {
 	cfg.conn.Register(flag.CommandLine)
 	flag.StringVar(&cfg.topic, "t", "mqttclient/test", "topic to publish to")
 	flag.StringVar(&cfg.message, "m", "hello {n}", "payload; {n} is replaced by the message number")
-	flag.IntVar(&cfg.size, "size", 0, "send a payload of this many bytes instead of -m")
+	flag.IntVar(&cfg.size, "size", 0, "send a payload of this many bytes of -pattern instead of -m")
+	flag.IntVar(&cfg.sizeStep, "size-step", 0, "grow -size by this many bytes for each message after the first")
+	flag.StringVar(&cfg.pattern, "pattern", "alpha", "-size payload pattern: "+cli.PatternNames())
 	flag.UintVar(&cfg.qos, "q", 0, "QoS: 0, 1 or 2")
 	flag.BoolVar(&cfg.retain, "r", false, "retain flag")
 	flag.IntVar(&cfg.count, "n", 1, "number of messages (0 publishes nothing, for -listen)")
@@ -79,6 +84,9 @@ func run() int {
 	flag.Parse()
 
 	props, err := cfg.properties()
+	if err == nil {
+		err = cfg.checkSize()
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mqttpub:", err)
 		return 2
@@ -116,12 +124,20 @@ func (cfg *config) properties() (*mqttclient.Properties, error) {
 	return p, nil
 }
 
+func (cfg *config) checkSize() error {
+	if cfg.sizeStep != 0 && cfg.size <= 0 {
+		return errors.New("-size-step needs -size")
+	}
+	if cfg.size+(cfg.count-1)*cfg.sizeStep < 0 {
+		return errors.New("-size-step shrinks the payload below zero")
+	}
+	_, err := cli.MakePattern(cfg.pattern, 0)
+	return err
+}
+
 func (cfg *config) payload(n int) []byte {
 	if cfg.size > 0 {
-		b := make([]byte, cfg.size)
-		for i := range b {
-			b[i] = 'a' + byte(i%26)
-		}
+		b, _ := cli.MakePattern(cfg.pattern, cfg.size+(n-1)*cfg.sizeStep)
 		return b
 	}
 	return []byte(strings.ReplaceAll(cfg.message, "{n}", strconv.Itoa(n)))

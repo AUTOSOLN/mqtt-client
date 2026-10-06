@@ -10,6 +10,7 @@
 //	mqttsub -v 5 -t test/a -no-local -retain-handling 2 -sub-id 7 -user k=v
 //	mqttsub -id inbox -clean=false -t 'test/in/#' -q 1 -W 1s
 //	mqttsub -id inbox -clean=false -U 'test/in/#' -W 1s
+//	mqttsub -t test/big -verify ascii -quiet
 package main
 
 import (
@@ -41,6 +42,8 @@ type config struct {
 	wait       time.Duration
 	reason     uint
 	quiet      bool
+	verify     string
+	verifySize int
 }
 
 func main() {
@@ -63,6 +66,8 @@ func run() int {
 	flag.DurationVar(&cfg.wait, "W", 0, "exit after this long (0: until -C or Ctrl-C)")
 	flag.UintVar(&cfg.reason, "reason", 0, "DISCONNECT reason code (MQTT 5 only)")
 	flag.BoolVar(&cfg.quiet, "quiet", false, "print only the subscription results and the summary, not every message")
+	flag.StringVar(&cfg.verify, "verify", "", "check every payload is this mqttpub -pattern ("+cli.PatternNames()+") and print its size")
+	flag.IntVar(&cfg.verifySize, "verify-size", -1, "with -verify, also require payloads of exactly this many bytes")
 	flag.Parse()
 
 	if err := cfg.check(); err != nil {
@@ -91,6 +96,13 @@ func (cfg *config) check() error {
 	if v5only && cfg.conn.Version != "5" {
 		return errors.New("-no-local, -retain-as-published, -retain-handling, -sub-id, -user and -reason require -v 5")
 	}
+	if cfg.verify != "" {
+		if _, err := cli.MakePattern(cfg.verify, 0); err != nil {
+			return err
+		}
+	} else if cfg.verifySize >= 0 {
+		return errors.New("-verify-size needs -verify")
+	}
 	return nil
 }
 
@@ -110,13 +122,21 @@ func (cfg *config) subscriptions() ([]mqttclient.Subscription, *mqttclient.Prope
 }
 
 func subscribe(ctx context.Context, cfg *config) error {
-	var received atomic.Int64
+	var received, bad atomic.Int64
 	enough := make(chan struct{})
 	s, err := cli.NewSession(&cfg.conn, mqttclient.Handlers{
 		OnMessage: func(_ *mqttclient.Client, m *mqttclient.Message) {
 			n := received.Add(1)
 			if !cfg.quiet {
 				cli.Logf("OnMessage %s", cli.DescribeMessage(m))
+			}
+			if cfg.verify != "" {
+				if err := cli.VerifyPattern(cfg.verify, m.Payload, cfg.verifySize); err != nil {
+					bad.Add(1)
+					cli.Logf("BAD message %d topic=%q bytes=%d: %v", n, m.Topic, len(m.Payload), err)
+				} else {
+					cli.Logf("verified message %d topic=%q bytes=%d", n, m.Topic, len(m.Payload))
+				}
 			}
 			if n == cfg.count {
 				close(enough)
@@ -137,6 +157,12 @@ func subscribe(ctx context.Context, cfg *config) error {
 		err = derr
 	}
 	cli.Logf("received %d messages", received.Load())
+	if cfg.verify != "" {
+		cli.Logf("verified %d, bad %d", received.Load()-bad.Load(), bad.Load())
+		if err == nil && bad.Load() > 0 {
+			err = fmt.Errorf("%d payloads failed verification", bad.Load())
+		}
+	}
 	if err == nil && cfg.count > 0 && received.Load() < cfg.count {
 		err = fmt.Errorf("received %d of %d messages", received.Load(), cfg.count)
 	}

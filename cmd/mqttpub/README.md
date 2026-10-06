@@ -48,7 +48,9 @@ Publish flags:
 |---|---|---|
 | `-t` | `mqttclient/test` | Topic |
 | `-m` | `hello {n}` | Payload. `{n}` is replaced by the message number, counting from 1. |
-| `-size` | `0` | Send a generated payload of this many bytes instead of `-m` |
+| `-size` | `0` | Send a generated payload of this many bytes of `-pattern` instead of `-m` |
+| `-size-step` | `0` | Grow the payload by this many bytes for each message after the first: message *n* is `-size + (n-1) × -size-step` bytes |
+| `-pattern` | `alpha` | `-size` payload: `alpha` (`abc…z` repeating), `ascii` (the 95 printable characters, space to `~`, repeating), `01` (`0101…`), or `binary` (bytes `00`–`ff` repeating; not UTF-8, like Sparkplug B protobuf). `mqttsub -verify` checks these. |
 | `-q` | `0` | QoS: 0, 1 or 2 |
 | `-r` | `false` | Retain flag |
 | `-n` | `1` | Number of messages. Use 0 to publish nothing, for example with `-listen`. |
@@ -122,6 +124,22 @@ acknowledgement frees a slot.
 A run with only a few messages may show about 40 ms per acknowledgement. That delay is Nagle's
 algorithm on the broker side: mosquitto's `set_tcp_nodelay` option is off by default. It does
 not show up with larger `-n` values.
+
+### Large payloads and broker size limits
+
+Sweep the payload size against a subscriber that checks every byte (see `mqttsub -verify`):
+
+```sh
+build/mqttsub -t test/big -verify binary -quiet -C 16 -W 60s
+build/mqttpub -t test/big -pattern binary -size 65536 -size-step 65536 -n 16 -sync -quiet
+```
+
+The first size missing from `mqttsub`'s `verified` lines is past the broker's limit. With `-v 5`
+a broker can advertise its limit (`max_packet=` on the connect line), and the client refuses to
+publish a bigger message. Under 3.1.1 (Sparkplug B) a broker can only drop the message or
+disconnect: a dropped QoS 0 message shows up only at the subscriber, and a disconnect shows up
+as `connection lost` here. With `-q 1`, an MQTT 5 broker may reply with reason `0x95`
+(packet too large).
 
 ### Receiving messages
 

@@ -46,6 +46,8 @@ SUBACK and UNSUBACK.
 | `-W` | `0` | Exit after this long. With neither `-C` nor `-W`, run until Ctrl-C. |
 | `-reason` | `0` | DISCONNECT reason code (needs `-v 5`) |
 | `-quiet` | `false` | Don't print each message |
+| `-verify` | | Check every payload is this `mqttpub -pattern` (`alpha`, `ascii`, `01`, `binary`) and print its size, even with `-quiet`. A payload that doesn't match fails the run, with the offset of the first bad byte. |
+| `-verify-size` | | With `-verify`, also require payloads of exactly this many bytes |
 
 Exit status:
 - **0:** success.
@@ -116,6 +118,17 @@ build/mqttconnect -v 5 -id nl                                                   
 ```
 
 Without `-no-local`, the same `mqttpub` run receives its 2 messages.
+
+### Large payloads
+
+```sh
+build/mqttsub -t 'spBv1.0/#' -verify binary -quiet -C 8 -W 60s
+build/mqttpub -t spBv1.0/g/DBIRTH/n/d -pattern binary -size 131072 -size-step 131072 -n 8 -sync -quiet
+```
+
+Each message prints `verified message N … bytes=…` or `BAD message …`. A message that
+the broker dropped doesn't show up at all, so `-C` isn't reached and the run fails with
+`received X of 8 messages`. The last `verified` size is the largest the broker passed.
 
 ### Persistent sessions
 

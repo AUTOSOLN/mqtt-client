@@ -89,6 +89,7 @@ type inPacket struct {
 	ReasonSet bool
 	Reasons   []byte // SUBACK/UNSUBACK per-filter codes
 	Topic     string
+	Payload   []byte // PUBLISH
 	Session   bool
 	Err       error // decode error, if the body did not parse
 }
@@ -136,6 +137,7 @@ func (rc *rawConn) readPacket(timeout time.Duration) (*inPacket, error) {
 	in.Err = decodeInbound(&pk, body)
 	in.PacketID = pk.PacketID
 	in.Topic = pk.TopicName
+	in.Payload = pk.Payload
 	in.Session = pk.SessionPresent
 	switch in.Type {
 	case packets.Connack, packets.Disconnect, packets.Auth,

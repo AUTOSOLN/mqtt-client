@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AUTOSOLN/mqtt-client/cmd/internal/cli"
 	"github.com/wind-c/comqtt/v2/mqtt/packets"
 )
 
@@ -100,6 +101,7 @@ func (r *runner) recv(s *Step) error {
 			first = in
 		}
 		logf("  recv %s", describe(in))
+		r.verifyPayload(s, in)
 	}
 
 	if s.Expect == "" {
@@ -137,6 +139,26 @@ func (r *runner) recv(s *Step) error {
 		}
 	}
 	return nil
+}
+
+// verifyPayload checks a received PUBLISH against the recv step's
+// payload-pattern and payload-size, when the step sets either.
+func (r *runner) verifyPayload(s *Step, in *inPacket) {
+	if in.Type != packets.Publish || (s.PayloadPattern == "" && s.PayloadSize == 0) {
+		return
+	}
+	pattern, size := s.PayloadPattern, s.PayloadSize
+	if pattern == "" {
+		pattern = "ascii"
+	}
+	if size == 0 {
+		size = -1
+	}
+	if err := cli.VerifyPattern(pattern, in.Payload, size); err != nil {
+		r.fail("payload: %v", err)
+		return
+	}
+	logf("  OK payload %d bytes of %s", len(in.Payload), pattern)
 }
 
 // expectClose asserts the server closes the connection within the timeout,
@@ -185,6 +207,9 @@ func describe(in *inPacket) string {
 	}
 	if in.Topic != "" {
 		fmt.Fprintf(&b, " topic=%q", in.Topic)
+	}
+	if in.Type == packets.Publish {
+		fmt.Fprintf(&b, " payload=%d bytes", len(in.Payload))
 	}
 	if in.ReasonSet {
 		fmt.Fprintf(&b, " reason=0x%02x", in.Reason)
