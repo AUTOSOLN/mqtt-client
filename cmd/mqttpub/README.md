@@ -41,6 +41,7 @@ Connection flags (shared with `mqttconnect`):
 | `-debug` | `false` | Print the client's debug log to stderr |
 | `-cafile`, `-cert`, `-key`, `-insecure`, `-servername` | | TLS, as in `mqttconnect` |
 | `-will-topic`, `-will-payload`, `-will-qos`, `-will-retain` | | Will, as in `mqttconnect` |
+| `-no-topic-check` | `false` | Send topics and topic filters (including the Will topic) without checking them, so an invalid one such as `a/#/b` or `a/+` reaches the broker. For testing how a broker handles them. |
 
 Publish flags:
 

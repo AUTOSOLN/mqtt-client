@@ -84,7 +84,7 @@ func (c *Client) SetCredentials(username string, password []byte) error {
 // SetWill replaces the Will sent in the next CONNECT; nil clears it
 // (mosquitto_will_set_v5 / mosquitto_will_clear).
 func (c *Client) SetWill(w *Message) error {
-	if err := checkWill(c.opts.ProtocolVersion, w); err != nil {
+	if err := checkWill(c.opts.ProtocolVersion, c.opts.NoTopicCheck, w); err != nil {
 		return err
 	}
 	c.mu.Lock()

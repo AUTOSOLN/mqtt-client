@@ -54,7 +54,7 @@ func (c *Client) Unsubscribe(ctx context.Context, topics []string, props *Proper
 		return nil, fmt.Errorf("%w: no topic filters", ErrInvalid)
 	}
 	for _, t := range topics {
-		if err := checkSubscribeTopic(t); err != nil {
+		if err := checkSubscribeTopic(t, c.opts.NoTopicCheck); err != nil {
 			return nil, fmt.Errorf("%w: topic filter %q: %v", ErrInvalid, t, err)
 		}
 	}
@@ -76,7 +76,7 @@ func (c *Client) checkSubscribe(subs []Subscription, props *Properties) error {
 		return fmt.Errorf("%w: no subscriptions", ErrInvalid)
 	}
 	for _, sub := range subs {
-		if err := checkSubscribeTopic(sub.Topic); err != nil {
+		if err := checkSubscribeTopic(sub.Topic, c.opts.NoTopicCheck); err != nil {
 			return fmt.Errorf("%w: topic filter %q: %v", ErrInvalid, sub.Topic, err)
 		}
 		if sub.QoS > 2 {

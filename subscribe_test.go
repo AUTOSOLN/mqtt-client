@@ -177,6 +177,21 @@ func TestSubscribeChecks(t *testing.T) {
 	}
 }
 
+func TestNoTopicCheck(t *testing.T) {
+	b := newFakeBroker(t)
+	c, _ := newSubClient(t, b, Options{NoTopicCheck: true})
+	fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
+
+	subscribeOK(t, c, []Subscription{{Topic: "a/#/+"}}, nil)
+	fc.expect(0x82, 0x0A, 0x00, 0x01, 0x00, 0x05, 'a', '/', '#', '/', '+', 0x00)
+	if _, err := c.Unsubscribe(context.Background(), []string{"b+"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	fc.expect(0xA2, 0x06, 0x00, 0x02, 0x00, 0x02, 'b', '+')
+	publishOK(t, c, &Message{Topic: "+"})
+	fc.expect(0x30, 0x03, 0x00, 0x01, '+')
+}
+
 func TestSubscribeV311Properties(t *testing.T) {
 	b := newFakeBroker(t)
 	c, _ := newSubClient(t, b, Options{})

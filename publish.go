@@ -144,7 +144,7 @@ func (c *Client) checkPublish(m *Message) error {
 	if m.QoS > 2 {
 		return fmt.Errorf("%w: qos %d", ErrInvalid, m.QoS)
 	}
-	if err := checkPublishTopic(m.Topic); err != nil {
+	if err := checkPublishTopic(m.Topic, c.opts.NoTopicCheck); err != nil {
 		return fmt.Errorf("%w: topic: %v", ErrInvalid, err)
 	}
 	if len(m.Payload) > maxPayload {
@@ -162,7 +162,7 @@ func (c *Client) checkPublish(m *Message) error {
 		}
 		if p.ResponseTopic != "" {
 			// The codec would silently drop an invalid one.
-			if err := checkPublishTopic(p.ResponseTopic); err != nil {
+			if err := checkPublishTopic(p.ResponseTopic, c.opts.NoTopicCheck); err != nil {
 				return fmt.Errorf("%w: response topic: %v", ErrInvalid, err)
 			}
 		}

@@ -41,6 +41,8 @@ type ConnFlags struct {
 	WillPayload string
 	WillQoS     uint
 	WillRetain  bool
+
+	NoTopicCheck bool
 }
 
 // Register adds the connection flags to fs.
@@ -64,6 +66,7 @@ func (f *ConnFlags) Register(fs *flag.FlagSet) {
 	fs.StringVar(&f.WillPayload, "will-payload", "", "Will payload")
 	fs.UintVar(&f.WillQoS, "will-qos", 0, "Will QoS")
 	fs.BoolVar(&f.WillRetain, "will-retain", false, "Will retain flag")
+	fs.BoolVar(&f.NoTopicCheck, "no-topic-check", false, "send topics and topic filters unchecked, even if invalid (for testing a broker)")
 }
 
 // ProtocolVersion parses -v.
@@ -124,6 +127,7 @@ func (f *ConnFlags) Options() (mqttclient.Options, error) {
 		KeepAlive:       uint16(f.KeepAlive),
 		Username:        f.Username,
 		TLSConfig:       tc,
+		NoTopicCheck:    f.NoTopicCheck,
 	}
 	if f.Password != "" {
 		opts.Password = []byte(f.Password)

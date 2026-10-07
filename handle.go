@@ -71,7 +71,7 @@ func (cn *conn) checkInboundPublish(pk *packets.Packet) error {
 	if pk.TopicName == "" {
 		return fmt.Errorf("%w: PUBLISH without a topic", ErrProtocol)
 	}
-	if err := checkPublishTopic(pk.TopicName); err != nil {
+	if err := checkPublishTopic(pk.TopicName, cn.c.opts.NoTopicCheck); err != nil {
 		return fmt.Errorf("%w: PUBLISH topic: %v", ErrMalformedPacket, err)
 	}
 	if pk.FixedHeader.Qos > 0 && pk.PacketID == 0 {

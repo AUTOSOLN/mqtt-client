@@ -113,6 +113,13 @@ type Options struct {
 
 	// Logger receives debug output. Nil discards it.
 	Logger *slog.Logger
+
+	// NoTopicCheck turns off the topic name and topic filter checks (empty
+	// topic, UTF-8 rules, wildcard placement) for PUBLISH, SUBSCRIBE,
+	// UNSUBSCRIBE, the Will and received PUBLISH, so that a malformed topic
+	// goes to the server as given. Only the 65535-byte limit remains. It is
+	// meant for testing how a server handles invalid topics.
+	NoTopicCheck bool
 }
 
 // Handlers are the client callbacks. They are called one at a time, in
@@ -238,7 +245,7 @@ func (o *Options) validate() error {
 	if err := checkCredentials(o.ProtocolVersion, o.Username, o.Password); err != nil {
 		return err
 	}
-	if err := checkWill(o.ProtocolVersion, o.Will); err != nil {
+	if err := checkWill(o.ProtocolVersion, o.NoTopicCheck, o.Will); err != nil {
 		return err
 	}
 	if o.ConnectProperties != nil && o.ProtocolVersion != MQTT5 {
@@ -283,11 +290,11 @@ func checkCredentials(version byte, username string, password []byte) error {
 	return nil
 }
 
-func checkWill(version byte, w *Message) error {
+func checkWill(version byte, noTopicCheck bool, w *Message) error {
 	if w == nil {
 		return nil
 	}
-	if err := checkPublishTopic(w.Topic); err != nil {
+	if err := checkPublishTopic(w.Topic, noTopicCheck); err != nil {
 		return fmt.Errorf("%w: will topic: %v", ErrInvalid, err)
 	}
 	if w.QoS > 2 {
@@ -318,8 +325,12 @@ func checkUTF8String(s string) error {
 }
 
 // checkPublishTopic is mosquitto_pub_topic_check: non-empty, valid UTF-8
-// string, no wildcards.
-func checkPublishTopic(topic string) error {
+// string, no wildcards. With noCheck only the encoding's length limit is
+// applied.
+func checkPublishTopic(topic string, noCheck bool) error {
+	if noCheck {
+		return checkTopicLength(topic)
+	}
 	if topic == "" {
 		return fmt.Errorf("empty topic")
 	}
@@ -333,8 +344,12 @@ func checkPublishTopic(topic string) error {
 }
 
 // checkSubscribeTopic is mosquitto_sub_topic_check: non-empty, valid UTF-8
-// string, and wildcards that fill a whole level, with '#' only last.
-func checkSubscribeTopic(filter string) error {
+// string, and wildcards that fill a whole level, with '#' only last. With
+// noCheck only the encoding's length limit is applied.
+func checkSubscribeTopic(filter string, noCheck bool) error {
+	if noCheck {
+		return checkTopicLength(filter)
+	}
 	if filter == "" {
 		return fmt.Errorf("empty topic filter")
 	}
@@ -349,6 +364,15 @@ func checkSubscribeTopic(filter string) error {
 		if strings.Contains(l, "#") && (l != "#" || i != len(levels)-1) {
 			return fmt.Errorf("'#' must be the whole last topic level")
 		}
+	}
+	return nil
+}
+
+// checkTopicLength is the one topic check Options.NoTopicCheck keeps: a
+// longer string cannot be encoded.
+func checkTopicLength(topic string) error {
+	if len(topic) > math.MaxUint16 {
+		return fmt.Errorf("longer than 65535 bytes")
 	}
 	return nil
 }
