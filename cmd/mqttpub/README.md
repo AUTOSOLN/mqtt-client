@@ -30,7 +30,8 @@ Connection flags (shared with `mqttconnect`):
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-server` | `mqtt://localhost:1883` | Broker URL: `mqtt://` or `tcp://` (default port 1883), `mqtts://`, `ssl://` or `tls://` (default port 8883) |
+| `-address` | `localhost:1883` | Broker address as `host:port` (IP address or hostname; the port is required) |
+| `-tls` | `false` | Connect with TLS. Never inferred from the port |
 | `-v` | `311` | Protocol version: `31`, `311` or `5` |
 | `-id` | empty | Client id. An empty id needs `-clean`. |
 | `-clean` | `true` | Clean session (3.x) or clean start (5). Use `-clean=false` to resume a session. |

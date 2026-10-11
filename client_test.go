@@ -16,7 +16,7 @@ type recorder struct {
 
 func newTestClient(t *testing.T, b *fakeBroker, opts Options) (*Client, *recorder) {
 	t.Helper()
-	opts.Server = b.url()
+	opts.Address = b.address()
 	rec := &recorder{connects: make(chan ConnAck, 10), disconnects: make(chan DisconnectEvent, 10)}
 	c, err := New(opts, Handlers{
 		OnConnect:    func(_ *Client, a ConnAck) { rec.connects <- a },
@@ -401,7 +401,7 @@ func TestDisconnectV5Reason(t *testing.T) {
 func TestDisconnectFromCallback(t *testing.T) {
 	b := newFakeBroker(t)
 	done := make(chan DisconnectEvent, 1)
-	c, err := New(Options{Server: b.url(), ClientID: "c", CleanStart: true}, Handlers{
+	c, err := New(Options{Address: b.address(), ClientID: "c", CleanStart: true}, Handlers{
 		OnConnect:    func(c *Client, _ ConnAck) { _ = c.Disconnect(context.Background(), 0, nil) },
 		OnDisconnect: func(_ *Client, ev DisconnectEvent) { done <- ev },
 	})
@@ -425,7 +425,7 @@ func TestDisconnectFromCallback(t *testing.T) {
 
 func TestPreConnectAndSetters(t *testing.T) {
 	b := newFakeBroker(t)
-	c, err := New(Options{Server: b.url(), ClientID: "c", CleanStart: true,
+	c, err := New(Options{Address: b.address(), ClientID: "c", CleanStart: true,
 		Will: &Message{Topic: "w", Payload: []byte("x")}}, Handlers{
 		OnPreConnect: func(c *Client) { _ = c.SetCredentials("late", []byte("pw")) },
 	})
@@ -464,17 +464,20 @@ func TestOptionsValidation(t *testing.T) {
 		opts Options
 		want error
 	}{
-		{"empty id without clean start", Options{Server: "mqtt://h"}, ErrInvalid},
-		{"keepalive below 5", Options{Server: "mqtt://h", CleanStart: true, KeepAlive: 4}, ErrInvalid},
-		{"bad protocol version", Options{Server: "mqtt://h", CleanStart: true, ProtocolVersion: 6}, ErrInvalid},
-		{"password without username", Options{Server: "mqtt://h", CleanStart: true, Password: []byte("p")}, ErrInvalid},
-		{"wildcard will topic", Options{Server: "mqtt://h", CleanStart: true, Will: &Message{Topic: "a/#"}}, ErrInvalid},
-		{"will qos 3", Options{Server: "mqtt://h", CleanStart: true, Will: &Message{Topic: "a", QoS: 3}}, ErrInvalid},
-		{"connect properties on 3.1.1", Options{Server: "mqtt://h", CleanStart: true, ConnectProperties: &Properties{}}, ErrNotSupported},
-		{"will properties on 3.1.1", Options{Server: "mqtt://h", CleanStart: true, Will: &Message{Topic: "a", Properties: &Properties{}}}, ErrNotSupported},
-		{"websocket scheme", Options{Server: "ws://h", CleanStart: true}, ErrInvalid},
-		{"missing host", Options{Server: "mqtt://", CleanStart: true}, ErrInvalid},
-		{"tls config on plain server", Options{Server: "mqtt://h", CleanStart: true, TLSConfig: tlsConfig()}, ErrInvalid},
+		{"empty id without clean start", Options{Address: "h:1883"}, ErrInvalid},
+		{"keepalive below 5", Options{Address: "h:1883", CleanStart: true, KeepAlive: 4}, ErrInvalid},
+		{"bad protocol version", Options{Address: "h:1883", CleanStart: true, ProtocolVersion: 6}, ErrInvalid},
+		{"password without username", Options{Address: "h:1883", CleanStart: true, Password: []byte("p")}, ErrInvalid},
+		{"wildcard will topic", Options{Address: "h:1883", CleanStart: true, Will: &Message{Topic: "a/#"}}, ErrInvalid},
+		{"will qos 3", Options{Address: "h:1883", CleanStart: true, Will: &Message{Topic: "a", QoS: 3}}, ErrInvalid},
+		{"connect properties on 3.1.1", Options{Address: "h:1883", CleanStart: true, ConnectProperties: &Properties{}}, ErrNotSupported},
+		{"will properties on 3.1.1", Options{Address: "h:1883", CleanStart: true, Will: &Message{Topic: "a", Properties: &Properties{}}}, ErrNotSupported},
+		{"url instead of address", Options{Address: "mqtt://h:1883", CleanStart: true}, ErrInvalid},
+		{"missing port", Options{Address: "h", CleanStart: true}, ErrInvalid},
+		{"port out of range", Options{Address: "h:65536", CleanStart: true}, ErrInvalid},
+		{"port zero", Options{Address: "h:0", CleanStart: true}, ErrInvalid},
+		{"missing host", Options{Address: ":1883", CleanStart: true}, ErrInvalid},
+		{"tls config without tls", Options{Address: "h:8883", CleanStart: true, TLSConfig: tlsConfig()}, ErrInvalid},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -483,13 +486,13 @@ func TestOptionsValidation(t *testing.T) {
 			}
 		})
 	}
-	if _, err := New(Options{Server: "mqtts://h", CleanStart: true, TLSConfig: tlsConfig()}, Handlers{}); err != nil {
+	if _, err := New(Options{Address: "h:8883", TLS: true, CleanStart: true, TLSConfig: tlsConfig()}, Handlers{}); err != nil {
 		t.Fatalf("valid TLS options: %v", err)
 	}
 }
 
 func TestDisconnectV311RejectsReason(t *testing.T) {
-	c, err := New(Options{Server: "mqtt://h", CleanStart: true}, Handlers{})
+	c, err := New(Options{Address: "h:1883", CleanStart: true}, Handlers{})
 	if err != nil {
 		t.Fatal(err)
 	}

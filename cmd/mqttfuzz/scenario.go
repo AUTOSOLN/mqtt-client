@@ -18,7 +18,8 @@ import (
 // two CONNECTs, a PUBLISH before CONNACK, and so on).
 type Scenario struct {
 	Version string         `yaml:"version"` // 31 | 311 | 5; the flag -v overrides it
-	Server  string         `yaml:"server"`  // the flag -server overrides it
+	Address string         `yaml:"address"` // host:port; the flag -address overrides it
+	TLS     bool           `yaml:"tls"`     // the flag -tls overrides it
 	Vars    map[string]any `yaml:"vars"`    // token defaults for ${name} substitution
 	Steps   []Step         `yaml:"steps"`
 }

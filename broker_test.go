@@ -28,7 +28,7 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 	return &fakeBroker{t: t, ln: ln}
 }
 
-func (b *fakeBroker) url() string { return "mqtt://" + b.ln.Addr().String() }
+func (b *fakeBroker) address() string { return b.ln.Addr().String() }
 
 type fakeConn struct {
 	t  *testing.T

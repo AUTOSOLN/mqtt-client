@@ -42,7 +42,7 @@ go build -o build/interactiveclient ./cmd/interactiveclient
 
 ## Flags
 
-The connection flags are the same as in the other tools: `-server`, `-v`, `-id`, `-clean`,
+The connection flags are the same as in the other tools: `-address`, `-tls`, `-v`, `-id`, `-clean`,
 `-session-expiry`, `-keepalive`, `-u`, `-P`, `-timeout`, `-debug`, TLS and Will. See the
 [mqttpub README](../mqttpub/README.md#flags).
 
@@ -110,7 +110,7 @@ Run a private broker so the system one keeps running:
 ```sh
 printf 'listener 18883 127.0.0.1\nallow_anonymous true\n' > /tmp/m.conf
 /usr/sbin/mosquitto -c /tmp/m.conf &
-build/interactiveclient -server mqtt://127.0.0.1:18883 -v 5 -keepalive 5 -interval 300ms \
+build/interactiveclient -address 127.0.0.1:18883 -v 5 -keepalive 5 -interval 300ms \
     -reconnect-delay 200ms -reconnect-delay-max 1s
 mosquitto_pub -p 18883 -t interactiveclient/on -m 1
 kill -9 %1                                   # broker gone: OnDisconnect, then OnConnectError each attempt

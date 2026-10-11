@@ -36,12 +36,12 @@ func New(opts Options, h Handlers) (*Client, error) {
 	if err := opts.validate(); err != nil {
 		return nil, err
 	}
-	srv, err := parseServer(opts.Server)
+	srv, err := parseServer(opts.Address, opts.TLS)
 	if err != nil {
 		return nil, err
 	}
-	if opts.TLSConfig != nil && !srv.useTLS {
-		return nil, fmt.Errorf("%w: TLSConfig set for non-TLS server %q", ErrInvalid, opts.Server)
+	if opts.TLSConfig != nil && !opts.TLS {
+		return nil, fmt.Errorf("%w: TLSConfig set without TLS", ErrInvalid)
 	}
 	log := opts.Logger
 	if log == nil {

@@ -194,7 +194,8 @@ type Message struct {
 }
 
 type Options struct {
-    Server            string        // one URL: mqtt:// tcp:// (1883), mqtts:// ssl:// tls:// (8883)
+    Address           string        // host:port (IP or hostname); port required
+    TLS               bool          // explicit; never inferred from the port
     ProtocolVersion   byte          // MQTT31, MQTT311 (default, as mosquitto), MQTT5
     ClientID          string        // empty only with CleanStart; MQTT31 gets a random mosq-… id
     CleanStart        bool
@@ -232,7 +233,8 @@ type DisconnectEvent struct {
 }
 ```
 
-`Server` is a single URL rather than a list: mosquitto connects to one host, and so does swarmy.
+`Address` is a single host:port rather than a list: mosquitto connects to one host, and so does swarmy.
+TLS is a separate flag, never inferred from the port.
 
 Publish follows `mosquitto_publish_v5`. Every message takes a mid, QoS 0 included. Argument
 errors (`ErrInvalid`), a QoS above the server's Maximum QoS (`ErrQoSNotSupported`) and a packet

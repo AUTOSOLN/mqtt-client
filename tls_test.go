@@ -10,7 +10,6 @@ import (
 	"errors"
 	"math/big"
 	"net"
-	"strings"
 	"testing"
 	"time"
 )
@@ -58,9 +57,8 @@ func newFakeTLSBroker(t *testing.T, cert tls.Certificate) *fakeBroker {
 func TestTLS(t *testing.T) {
 	cert, pool := selfSigned(t)
 	b := newFakeTLSBroker(t, cert)
-	url := strings.Replace(b.url(), "mqtt://", "mqtts://", 1)
 
-	c, err := New(Options{Server: url, ClientID: "c", CleanStart: true, TLSConfig: &tls.Config{RootCAs: pool}}, Handlers{})
+	c, err := New(Options{Address: b.address(), TLS: true, ClientID: "c", CleanStart: true, TLSConfig: &tls.Config{RootCAs: pool}}, Handlers{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,9 +78,8 @@ func TestTLS(t *testing.T) {
 func TestTLSUntrustedCertificate(t *testing.T) {
 	cert, _ := selfSigned(t)
 	b := newFakeTLSBroker(t, cert)
-	url := strings.Replace(b.url(), "mqtt://", "mqtts://", 1)
 
-	c, err := New(Options{Server: url, ClientID: "c", CleanStart: true}, Handlers{})
+	c, err := New(Options{Address: b.address(), TLS: true, ClientID: "c", CleanStart: true}, Handlers{})
 	if err != nil {
 		t.Fatal(err)
 	}

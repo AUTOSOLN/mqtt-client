@@ -118,7 +118,7 @@ func subscribeOnConnect(topic string) func(*mqttclient.Client, mqttclient.ConnAc
 
 func options(b *broker, version byte, id string) mqttclient.Options {
 	return mqttclient.Options{
-		Server:          b.url(),
+		Address:         b.address(),
 		ProtocolVersion: version,
 		ClientID:        id,
 		CleanStart:      true,

@@ -101,7 +101,7 @@ func connectStay(port int, opts mqttclient.Options) int {
 }
 
 func run(port int, opts mqttclient.Options, setup func(*mqttclient.Client) error, h mqttclient.Handlers, stay bool) int {
-	opts.Server = fmt.Sprintf("mqtt://localhost:%d", port)
+	opts.Address = fmt.Sprintf("localhost:%d", port)
 	done := make(chan int, 1)
 	h.OnConnect = func(c *mqttclient.Client, ack mqttclient.ConnAck) {
 		if ack.ReasonCode != 0 {

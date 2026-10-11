@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
-	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -49,11 +49,16 @@ type Message struct {
 	Mid uint16
 }
 
-// Options configures a Client. Server is the only required field.
+// Options configures a Client. Address is the only required field.
 type Options struct {
-	// Server is the broker URL: mqtt:// or tcp:// for plain TCP (default port
-	// 1883), mqtts://, ssl:// or tls:// for TLS (default port 8883).
-	Server string
+	// Address is the broker as host:port, where host is an IP address or a
+	// hostname (an IPv6 address in brackets, "[::1]:1883"). The port is
+	// required.
+	Address string
+
+	// TLS connects with TLS rather than plain TCP. It is never inferred from
+	// the port.
+	TLS bool
 
 	// ProtocolVersion is MQTT31, MQTT311 or MQTT5. Zero means MQTT311, the
 	// libmosquitto default.
@@ -107,8 +112,9 @@ type Options struct {
 	// to CONNACK. Zero means 30s.
 	ConnectTimeout time.Duration
 
-	// TLSConfig is used for mqtts/ssl/tls servers. If nil, a default
-	// configuration with ServerName set from the URL host is used.
+	// TLSConfig is used when TLS is set, and setting it without TLS is an
+	// error. If nil, a default configuration with ServerName set from the
+	// Address host is used.
 	TLSConfig *tls.Config
 
 	// Logger receives debug output. Nil discards it.
@@ -187,37 +193,25 @@ type DisconnectEvent struct {
 	Properties *Properties
 }
 
-// server is a parsed Options.Server.
+// server is the parsed Options.Address and Options.TLS.
 type server struct {
 	addr   string // host:port
 	host   string
 	useTLS bool
 }
 
-func parseServer(s string) (server, error) {
-	u, err := url.Parse(s)
+func parseServer(addr string, useTLS bool) (server, error) {
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return server{}, fmt.Errorf("%w: server %q: %v", ErrInvalid, s, err)
+		return server{}, fmt.Errorf("%w: address %q: %v", ErrInvalid, addr, err)
 	}
-	var sv server
-	port := "1883"
-	switch strings.ToLower(u.Scheme) {
-	case "mqtt", "tcp":
-	case "mqtts", "ssl", "tls":
-		sv.useTLS = true
-		port = "8883"
-	default:
-		return server{}, fmt.Errorf("%w: server %q: unsupported scheme %q", ErrInvalid, s, u.Scheme)
+	if host == "" {
+		return server{}, fmt.Errorf("%w: address %q: missing host", ErrInvalid, addr)
 	}
-	sv.host = u.Hostname()
-	if sv.host == "" {
-		return server{}, fmt.Errorf("%w: server %q: missing host", ErrInvalid, s)
+	if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+		return server{}, fmt.Errorf("%w: address %q: port must be 1-65535", ErrInvalid, addr)
 	}
-	if p := u.Port(); p != "" {
-		port = p
-	}
-	sv.addr = net.JoinHostPort(sv.host, port)
-	return sv, nil
+	return server{addr: addr, host: host, useTLS: useTLS}, nil
 }
 
 // validate checks and normalises opts in place.

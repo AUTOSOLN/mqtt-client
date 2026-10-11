@@ -20,7 +20,8 @@ import (
 
 // ConnFlags are the flags that describe a connection.
 type ConnFlags struct {
-	Server        string
+	Address       string
+	TLS           bool
 	Version       string
 	ClientID      string
 	Clean         bool
@@ -47,7 +48,8 @@ type ConnFlags struct {
 
 // Register adds the connection flags to fs.
 func (f *ConnFlags) Register(fs *flag.FlagSet) {
-	fs.StringVar(&f.Server, "server", "mqtt://localhost:1883", "broker URL: mqtt://, tcp://, mqtts://, ssl:// or tls://")
+	fs.StringVar(&f.Address, "address", "localhost:1883", "broker address as host:port")
+	fs.BoolVar(&f.TLS, "tls", false, "connect with TLS")
 	fs.StringVar(&f.Version, "v", "311", "MQTT protocol version: 31, 311 or 5")
 	fs.StringVar(&f.ClientID, "id", "", "client id (empty requires -clean)")
 	fs.BoolVar(&f.Clean, "clean", true, "clean session / clean start")
@@ -61,7 +63,7 @@ func (f *ConnFlags) Register(fs *flag.FlagSet) {
 	fs.StringVar(&f.CertFile, "cert", "", "PEM client certificate (TLS)")
 	fs.StringVar(&f.KeyFile, "key", "", "PEM client private key (TLS)")
 	fs.BoolVar(&f.Insecure, "insecure", false, "skip server certificate verification (TLS)")
-	fs.StringVar(&f.ServerName, "servername", "", "TLS server name, if different from the URL host")
+	fs.StringVar(&f.ServerName, "servername", "", "TLS server name, if different from the -address host")
 	fs.StringVar(&f.WillTopic, "will-topic", "", "Will topic (enables the Will)")
 	fs.StringVar(&f.WillPayload, "will-payload", "", "Will payload")
 	fs.UintVar(&f.WillQoS, "will-qos", 0, "Will QoS")
@@ -120,7 +122,8 @@ func (f *ConnFlags) Options() (mqttclient.Options, error) {
 		return mqttclient.Options{}, err
 	}
 	opts := mqttclient.Options{
-		Server:          f.Server,
+		Address:         f.Address,
+		TLS:             f.TLS,
 		ProtocolVersion: version,
 		ClientID:        f.ClientID,
 		CleanStart:      f.Clean,

@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/url"
-	"strings"
 	"time"
 
 	"github.com/wind-c/comqtt/v2/mqtt/packets"
@@ -23,26 +21,13 @@ type rawConn struct {
 	version byte
 }
 
-// dial opens a TCP (or TLS) connection to server. tc may be nil for plain
-// TCP. The scheme picks the default port: 1883 for mqtt/tcp, 8883 for
-// mqtts/ssl/tls.
-func dial(ctx context.Context, server string, tc *tls.Config, timeout time.Duration, version byte) (*rawConn, error) {
-	u, err := url.Parse(server)
+// dial opens a TCP connection to addr (host:port), with a TLS handshake when
+// useTLS is set. tc may be nil.
+func dial(ctx context.Context, addr string, useTLS bool, tc *tls.Config, timeout time.Duration, version byte) (*rawConn, error) {
+	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return nil, err
+		return nil, err // already names the address
 	}
-	useTLS, port := false, "1883"
-	switch strings.ToLower(u.Scheme) {
-	case "mqtt", "tcp":
-	case "mqtts", "ssl", "tls":
-		useTLS, port = true, "8883"
-	default:
-		return nil, fmt.Errorf("unsupported scheme %q", u.Scheme)
-	}
-	if p := u.Port(); p != "" {
-		port = p
-	}
-	addr := net.JoinHostPort(u.Hostname(), port)
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -57,7 +42,7 @@ func dial(ctx context.Context, server string, tc *tls.Config, timeout time.Durat
 			tc = &tls.Config{}
 		}
 		if tc.ServerName == "" {
-			tc.ServerName = u.Hostname()
+			tc.ServerName = host
 		}
 		tconn := tls.Client(nc, tc)
 		if err := tconn.HandshakeContext(ctx); err != nil {

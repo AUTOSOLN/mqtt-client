@@ -91,7 +91,7 @@ func TestRunServerDownAtStart(t *testing.T) {
 
 	failures := make(chan error, 100)
 	connects := make(chan ConnAck, 1)
-	c, err := New(fast(Options{Server: "mqtt://" + addr, ClientID: "c", CleanStart: true}), Handlers{
+	c, err := New(fast(Options{Address: addr, ClientID: "c", CleanStart: true}), Handlers{
 		OnConnectError: func(_ *Client, err error) { failures <- err },
 		OnConnect:      func(_ *Client, a ConnAck) { connects <- a },
 	})
@@ -272,7 +272,7 @@ func TestReconnectDelay(t *testing.T) {
 	}
 	for _, tc := range cases {
 		opts := tc.opts
-		opts.Server, opts.CleanStart = "mqtt://h", true
+		opts.Address, opts.CleanStart = "h:1883", true
 		c, err := New(opts, Handlers{})
 		if err != nil {
 			t.Fatal(err)

@@ -1,7 +1,7 @@
 // Command mqttconnect is a manual test tool for this client. It runs a
 // chosen combination of steps against a real broker:
 //
-//	tcp         open a TCP connection (and TLS handshake for mqtts://), then close it
+//	tcp         open a TCP connection (and TLS handshake with -tls), then close it
 //	connect     open a connection, send CONNECT and wait for CONNACK
 //	disconnect  send DISCONNECT and wait for the connection to close
 //
@@ -12,9 +12,9 @@
 //
 // Examples:
 //
-//	mqttconnect -server mqtt://localhost:1883 -steps tcp
-//	mqttconnect -server mqtt://localhost:1883 -v 5 -id test1 -hold 30s -debug
-//	mqttconnect -server mqtts://broker:8883 -cafile ca.pem -u user -P secret
+//	mqttconnect -address localhost:1883 -steps tcp
+//	mqttconnect -address localhost:1883 -v 5 -id test1 -hold 30s -debug
+//	mqttconnect -address broker:8883 -tls -cafile ca.pem -u user -P secret
 //	mqttconnect -steps connect -hold 5s -will-topic t/will -will-payload bye
 package main
 
@@ -25,7 +25,6 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -118,22 +117,11 @@ func parseSteps(s string) (tcp, connect, disconnect bool, err error) {
 // tcpOnly dials the server without speaking MQTT. The client package does
 // not expose a dial-only step, so this uses net and crypto/tls directly.
 func tcpOnly(ctx context.Context, f *cli.ConnFlags) error {
-	u, err := url.Parse(f.Server)
+	addr := f.Address
+	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return err
+		return fmt.Errorf("address %q: %w", addr, err)
 	}
-	useTLS, port := false, "1883"
-	switch strings.ToLower(u.Scheme) {
-	case "mqtt", "tcp":
-	case "mqtts", "ssl", "tls":
-		useTLS, port = true, "8883"
-	default:
-		return fmt.Errorf("unsupported scheme %q", u.Scheme)
-	}
-	if p := u.Port(); p != "" {
-		port = p
-	}
-	addr := net.JoinHostPort(u.Hostname(), port)
 
 	ctx, cancel := context.WithTimeout(ctx, f.Timeout)
 	defer cancel()
@@ -145,7 +133,7 @@ func tcpOnly(ctx context.Context, f *cli.ConnFlags) error {
 	}
 	defer nc.Close()
 	cli.Logf("tcp connected %s -> %s in %v", nc.LocalAddr(), nc.RemoteAddr(), cli.Since(start))
-	if !useTLS {
+	if !f.TLS {
 		return nil
 	}
 
@@ -157,7 +145,7 @@ func tcpOnly(ctx context.Context, f *cli.ConnFlags) error {
 		tc = &tls.Config{}
 	}
 	if tc.ServerName == "" {
-		tc.ServerName = u.Hostname()
+		tc.ServerName = host
 	}
 	tconn := tls.Client(nc, tc)
 	if err := tconn.HandshakeContext(ctx); err != nil {

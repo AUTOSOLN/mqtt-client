@@ -27,7 +27,7 @@ go build -o build/mqttsub ./cmd/mqttsub
 ## Flags
 
 The connection flags are listed in the [mqttpub README](../mqttpub/README.md#flags). They are
-`-server`, `-v`, `-id`, `-clean`, `-session-expiry`, `-keepalive`, `-u`, `-P`, `-timeout`,
+`-address`, `-tls`, `-v`, `-id`, `-clean`, `-session-expiry`, `-keepalive`, `-u`, `-P`, `-timeout`,
 `-debug`, `-no-topic-check`, the TLS flags and the Will flags. With `-no-topic-check`, an
 invalid filter such as `a/#/+/b` is sent to the broker as given instead of being refused. `-timeout` also limits how long the tool waits for
 SUBACK and UNSUBACK.

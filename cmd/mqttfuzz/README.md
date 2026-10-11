@@ -31,13 +31,14 @@ go build -o build/mqttfuzz ./cmd/mqttfuzz
 ## Usage
 
 ```sh
-mqttfuzz -f scenario.yaml [-server URL] [-v 31|311|5] [-set name=value ...]
+mqttfuzz -f scenario.yaml [-address host:port] [-tls] [-v 31|311|5] [-set name=value ...]
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `-f` | — | Scenario YAML file (required) |
-| `-server` | scenario's `server:`, else `mqtt://localhost:1883` | Broker URL: `mqtt://`, `tcp://`, `mqtts://`, `ssl://`, `tls://` |
+| `-address` | scenario's `address:`, else `localhost:1883` | Broker address as `host:port` (IP address or hostname; the port is required) |
+| `-tls` | scenario's `tls:`, else `false` | Connect with TLS. Never inferred from the port |
 | `-v` | scenario's `version:`, else `311` | Protocol version: `31`, `311` or `5` |
 | `-set name=value` | — | Override a token (repeatable) |
 | `-recv-timeout` | `2s` | Default wait for a `recv` / `expect-close` step |
@@ -52,7 +53,8 @@ or I/O error.
 
 ```yaml
 version: 5            # 31 | 311 | 5; -v overrides
-server: mqtt://localhost:1883   # -server overrides
+address: localhost:1883   # -address overrides
+tls: false            # -tls overrides
 vars:                 # token defaults; -set overrides; values may nest tokens
   id: fuzz-${rand}
   topic: test/topic

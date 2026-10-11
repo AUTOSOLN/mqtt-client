@@ -6,7 +6,7 @@ built on the [comqtt](https://github.com/AUTOSOLN/comqtt) packet codec.
 
 ```go
 c, err := mqttclient.New(mqttclient.Options{
-	Server:          "mqtt://localhost:1883",
+	Address:         "localhost:1883",
 	ProtocolVersion: mqttclient.MQTT5,
 	ClientID:        "example",
 	CleanStart:      true,

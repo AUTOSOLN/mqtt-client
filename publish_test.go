@@ -22,7 +22,7 @@ type publishEvent struct {
 
 func newPubClient(t *testing.T, b *fakeBroker, opts Options) (*Client, *pubRecorder) {
 	t.Helper()
-	opts.Server = b.url()
+	opts.Address = b.address()
 	if opts.ClientID == "" {
 		opts.ClientID = "c"
 	}
@@ -273,7 +273,7 @@ func TestPublishChecks(t *testing.T) {
 }
 
 func TestPublishV311Properties(t *testing.T) {
-	c, err := New(Options{Server: "mqtt://h", CleanStart: true}, Handlers{})
+	c, err := New(Options{Address: "h:1883", CleanStart: true}, Handlers{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,7 +513,7 @@ func TestMidAllocation(t *testing.T) {
 // publishes cannot overtake the acknowledgement (11-prop-recv-qos1).
 func TestAckBeforeDelivery(t *testing.T) {
 	b := newFakeBroker(t)
-	c, err := New(Options{Server: b.url(), ClientID: "c", CleanStart: true}, Handlers{
+	c, err := New(Options{Address: b.address(), ClientID: "c", CleanStart: true}, Handlers{
 		OnMessage: func(c *Client, _ *Message) { _, _ = c.Publish(context.Background(), &Message{Topic: "ok"}) },
 	})
 	if err != nil {

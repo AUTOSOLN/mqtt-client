@@ -29,7 +29,7 @@ func finish(rc int) {
 // OnDisconnect handler, a clean disconnect finishes with 0 and a lost
 // connection with 1.
 func client(port int, opts mqttclient.Options, h mqttclient.Handlers) int {
-	opts.Server = fmt.Sprintf("mqtt://localhost:%d", port)
+	opts.Address = fmt.Sprintf("localhost:%d", port)
 	opts.CleanStart = true
 	if opts.KeepAlive == 0 {
 		opts.KeepAlive = 60
@@ -60,7 +60,7 @@ func client(port int, opts mqttclient.Options, h mqttclient.Handlers) int {
 // Run keeps the connection up, reconnecting after a loss, and the program
 // ends when Run returns (after Disconnect).
 func runForever(port int, opts mqttclient.Options, h mqttclient.Handlers) int {
-	opts.Server = fmt.Sprintf("mqtt://localhost:%d", port)
+	opts.Address = fmt.Sprintf("localhost:%d", port)
 	opts.CleanStart = true
 	if opts.KeepAlive == 0 {
 		opts.KeepAlive = 60
