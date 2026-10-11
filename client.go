@@ -3,6 +3,7 @@ package mqttclient
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -11,19 +12,27 @@ import (
 	"github.com/wind-c/comqtt/v2/mqtt/packets"
 )
 
-// Client is an MQTT client connection to a single server. It is safe for
-// concurrent use.
+// Client is an MQTT client connection to one of the servers in
+// Options.Servers at a time. It is safe for concurrent use.
 type Client struct {
 	opts Options
 	h    Handlers
-	srv  server
 	log  *slog.Logger
 	disp dispatcher
 	sess session
 
-	mu              sync.Mutex
-	cn              *conn   // current network connection, nil when disconnected
-	runner          *runner // set while Run is active
+	mu     sync.Mutex
+	cn     *conn   // current network connection, nil when disconnected
+	runner *runner // set while Run is active
+	srvs   []*serverState
+	cur    int // index in srvs of the current server
+}
+
+// serverState is one of Options.Servers with the settings that may change
+// after New.
+type serverState struct {
+	Server
+	host            string
 	clientID        string
 	username        string
 	password        []byte
@@ -36,60 +45,89 @@ func New(opts Options, h Handlers) (*Client, error) {
 	if err := opts.validate(); err != nil {
 		return nil, err
 	}
-	srv, err := parseServer(opts.Address, opts.TLS)
-	if err != nil {
-		return nil, err
-	}
-	if opts.TLSConfig != nil && !opts.TLS {
-		return nil, fmt.Errorf("%w: TLSConfig set without TLS", ErrInvalid)
-	}
 	log := opts.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	c := &Client{
-		opts:     opts,
-		h:        h,
-		srv:      srv,
-		log:      log,
-		clientID: opts.ClientID,
-		username: opts.Username,
-		password: opts.Password,
-		will:     copyMessage(opts.Will),
+	c := &Client{opts: opts, h: h, log: log}
+	for _, s := range opts.Servers {
+		host, _ := splitAddress(s.Address)
+		c.srvs = append(c.srvs, &serverState{
+			Server:          s,
+			host:            host,
+			clientID:        s.ClientID,
+			username:        s.Username,
+			password:        s.Password,
+			will:            copyMessage(s.Will),
+			retainAvailable: true,
+		})
 	}
 	c.sess.init()
 	return c, nil
 }
 
-// ClientID returns the client identifier, which may have been assigned by
-// an MQTT 5 server in CONNACK.
+// ServerIndex returns the index in Options.Servers of the current server:
+// the one the client is connected to, or is connecting to, or will try
+// next. It starts at 0. OnPreConnect may call it to learn which server is
+// about to be tried.
+func (c *Client) ServerIndex() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cur
+}
+
+// server returns the current server. c.mu must be held.
+func (c *Client) server() *serverState { return c.srvs[c.cur] }
+
+// version returns the protocol version of the current server.
+func (c *Client) version() byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.server().ProtocolVersion
+}
+
+// advance makes the server after i current, if i still is.
+func (c *Client) advance(i int) {
+	c.mu.Lock()
+	if c.cur == i {
+		c.cur = (i + 1) % len(c.srvs)
+	}
+	c.mu.Unlock()
+}
+
+// ClientID returns the client identifier for the current server, which may
+// have been assigned by an MQTT 5 server in CONNACK.
 func (c *Client) ClientID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.clientID
+	return c.server().clientID
 }
 
 // SetCredentials replaces the username and password sent in the next
-// CONNECT (mosquitto_username_pw_set).
+// CONNECT to the current server (mosquitto_username_pw_set). Call it from
+// OnPreConnect to change them for the server about to be tried.
 func (c *Client) SetCredentials(username string, password []byte) error {
-	if err := checkCredentials(c.opts.ProtocolVersion, username, password); err != nil {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.server()
+	if err := checkCredentials(s.ProtocolVersion, username, password); err != nil {
 		return err
 	}
-	c.mu.Lock()
-	c.username, c.password = username, password
-	c.mu.Unlock()
+	s.username, s.password = username, password
 	return nil
 }
 
-// SetWill replaces the Will sent in the next CONNECT; nil clears it
-// (mosquitto_will_set_v5 / mosquitto_will_clear).
+// SetWill replaces the Will sent in the next CONNECT to the current server;
+// nil clears it (mosquitto_will_set_v5 / mosquitto_will_clear). Call it from
+// OnPreConnect to change it for the server about to be tried.
 func (c *Client) SetWill(w *Message) error {
-	if err := checkWill(c.opts.ProtocolVersion, c.opts.NoTopicCheck, w); err != nil {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.server()
+	if err := checkWill(s.ProtocolVersion, c.opts.NoTopicCheck, w); err != nil {
 		return err
 	}
-	c.mu.Lock()
-	c.will = copyMessage(w)
-	c.mu.Unlock()
+	s.will = copyMessage(w)
 	return nil
 }
 
@@ -103,8 +141,15 @@ func (c *Client) IsConnected() bool {
 
 // Connect opens a network connection, sends CONNECT and waits for CONNACK
 // or for ctx to end. OnConnect is called when CONNACK arrives; if the
-// connection is refused, Connect returns a *ConnRefusedError and
-// OnDisconnect follows.
+// connection is refused, OnDisconnect follows.
+//
+// Connect tries each server once, in order, starting from the current one
+// (see ServerIndex), and stops at the first that accepts the connection.
+// Each attempt is also bounded by that server's ConnectTimeout. If every
+// attempt fails, the server after the last one tried becomes current, and
+// Connect returns the error from a single server as it is (a
+// *ConnRefusedError for a refusal), or the errors from several servers
+// joined.
 //
 // Connect does not reconnect after the connection is lost; OnDisconnect
 // reports the loss and Connect may be called again. Use Run for a
@@ -116,15 +161,54 @@ func (c *Client) Connect(ctx context.Context) (ConnAck, error) {
 	if running {
 		return ConnAck{}, ErrRunning
 	}
-	ack, _, err := c.connect(ctx, true)
-	return ack, err
+	var ack ConnAck
+	var errs []error
+	for range c.srvs {
+		i := c.ServerIndex()
+		var err error
+		ack, _, err = c.connectTimeout(ctx, i, true)
+		if err == nil {
+			return ack, nil
+		}
+		if ctx.Err() != nil || errors.Is(err, ErrDisconnected) || errors.Is(err, ErrAlreadyConnected) {
+			return ack, err
+		}
+		errs = append(errs, c.serverErr(i, err))
+		c.advance(i)
+	}
+	return ack, joinServerErrs(errs)
 }
 
-// connect makes one connection attempt and returns the connection on
-// success. resetRetain assumes the server supports retain again, as
-// mosquitto_connect does; mosquitto_reconnect keeps the last CONNACK's
-// value, which decides whether the Will is sent with retain.
-func (c *Client) connect(ctx context.Context, resetRetain bool) (ConnAck, *conn, error) {
+// connectTimeout is connect bounded by the server's ConnectTimeout.
+func (c *Client) connectTimeout(ctx context.Context, i int, resetRetain bool) (ConnAck, *conn, error) {
+	actx, cancel := context.WithTimeout(ctx, c.srvs[i].ConnectTimeout)
+	defer cancel()
+	return c.connect(actx, i, resetRetain)
+}
+
+// serverErr labels err with server i's address when there are several
+// servers.
+func (c *Client) serverErr(i int, err error) error {
+	if len(c.srvs) == 1 {
+		return err
+	}
+	return fmt.Errorf("server %d (%s): %w", i, c.srvs[i].Address, err)
+}
+
+// joinServerErrs returns the one error of a single server unchanged.
+func joinServerErrs(errs []error) error {
+	if len(errs) == 1 {
+		return errs[0]
+	}
+	return errors.Join(errs...)
+}
+
+// connect makes one connection attempt to server i, which becomes current,
+// and returns the connection on success. resetRetain assumes the server
+// supports retain again, as mosquitto_connect does; mosquitto_reconnect
+// keeps the last CONNACK's value, which decides whether the Will is sent
+// with retain.
+func (c *Client) connect(ctx context.Context, i int, resetRetain bool) (ConnAck, *conn, error) {
 	ctx, abort := context.WithCancel(ctx)
 	defer abort()
 	c.mu.Lock()
@@ -132,11 +216,13 @@ func (c *Client) connect(ctx context.Context, resetRetain bool) (ConnAck, *conn,
 		c.mu.Unlock()
 		return ConnAck{}, nil, ErrAlreadyConnected
 	}
-	cn := newConn(c)
+	c.cur = i
+	srv := c.srvs[i]
+	cn := newConn(c, srv)
 	cn.abort = abort
 	c.cn = cn
 	if resetRetain {
-		c.retainAvailable = true
+		srv.retainAvailable = true
 	}
 	c.mu.Unlock()
 
@@ -144,7 +230,7 @@ func (c *Client) connect(ctx context.Context, resetRetain bool) (ConnAck, *conn,
 		c.h.OnPreConnect(c)
 	}
 
-	nc, err := c.dial(ctx)
+	nc, err := c.dial(ctx, srv)
 	if err != nil {
 		c.mu.Lock()
 		c.cn = nil
@@ -152,21 +238,21 @@ func (c *Client) connect(ctx context.Context, resetRetain bool) (ConnAck, *conn,
 		if cn.userDisconnect.Load() {
 			return ConnAck{}, nil, ErrDisconnected
 		}
-		return ConnAck{}, nil, fmt.Errorf("mqttclient: connect to %s: %w", c.srv.addr, err)
+		return ConnAck{}, nil, fmt.Errorf("mqttclient: connect to %s: %w", srv.Address, err)
 	}
 
 	c.mu.Lock()
 	pk := newConnect(connectParams{
-		version:         c.opts.ProtocolVersion,
-		clientID:        c.clientID,
-		cleanStart:      c.opts.CleanStart,
-		keepAlive:       c.opts.KeepAlive,
-		username:        c.username,
-		password:        c.password,
-		will:            c.will,
-		retainAvailable: c.retainAvailable,
-		properties:      c.opts.ConnectProperties,
-		receiveMaximum:  c.opts.ReceiveMaximum,
+		version:         srv.ProtocolVersion,
+		clientID:        srv.clientID,
+		cleanStart:      srv.CleanStart,
+		keepAlive:       srv.KeepAlive,
+		username:        srv.username,
+		password:        srv.password,
+		will:            srv.will,
+		retainAvailable: srv.retainAvailable,
+		properties:      srv.ConnectProperties,
+		receiveMaximum:  srv.ReceiveMaximum,
 	})
 	c.mu.Unlock()
 	if p := connectProperties(&pk); p != nil {
@@ -234,12 +320,16 @@ func (c *Client) connect(ctx context.Context, resetRetain bool) (ConnAck, *conn,
 // With Run, Disconnect also stops Run, which returns nil; it does not wait
 // for Run to return. Between connections, Disconnect only stops Run.
 func (c *Client) Disconnect(ctx context.Context, reason byte, props *Properties) error {
-	if c.opts.ProtocolVersion != MQTT5 && (reason != 0 || props != nil) {
-		return fmt.Errorf("%w: DISCONNECT reason code and properties require MQTT 5", ErrNotSupported)
-	}
 	c.mu.Lock()
 	cn, r := c.cn, c.runner
+	version := c.server().ProtocolVersion
 	c.mu.Unlock()
+	if cn != nil {
+		version = cn.version
+	}
+	if version != MQTT5 && (reason != 0 || props != nil) {
+		return fmt.Errorf("%w: DISCONNECT reason code and properties require MQTT 5", ErrNotSupported)
+	}
 	if r != nil {
 		r.requestStop()
 	}
@@ -261,7 +351,7 @@ func (c *Client) Disconnect(ctx context.Context, reason byte, props *Properties)
 func (c *Client) disconnect(ctx context.Context, cn *conn, reason byte, props *Properties) error {
 	cn.userDisconnect.Store(true)
 
-	pk := newDisconnect(c.opts.ProtocolVersion, reason, props)
+	pk := newDisconnect(cn.version, reason, props)
 	deadline, _ := ctx.Deadline()
 	err := cn.write(&pk, deadline)
 	cn.close(nil)
@@ -273,20 +363,20 @@ func (c *Client) disconnect(ctx context.Context, cn *conn, reason byte, props *P
 	return err
 }
 
-func (c *Client) dial(ctx context.Context) (net.Conn, error) {
+func (c *Client) dial(ctx context.Context, srv *serverState) (net.Conn, error) {
 	var d net.Dialer
-	if !c.srv.useTLS {
-		return d.DialContext(ctx, "tcp", c.srv.addr)
+	if !srv.TLS {
+		return d.DialContext(ctx, "tcp", srv.Address)
 	}
 	cfg := &tls.Config{}
-	if c.opts.TLSConfig != nil {
-		cfg = c.opts.TLSConfig.Clone()
+	if srv.TLSConfig != nil {
+		cfg = srv.TLSConfig.Clone()
 	}
 	if cfg.ServerName == "" {
-		cfg.ServerName = c.srv.host
+		cfg.ServerName = srv.host
 	}
 	td := tls.Dialer{NetDialer: &d, Config: cfg}
-	return td.DialContext(ctx, "tcp", c.srv.addr)
+	return td.DialContext(ctx, "tcp", srv.Address)
 }
 
 func copyMessage(m *Message) *Message {

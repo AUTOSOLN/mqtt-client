@@ -35,9 +35,10 @@ func (c *Client) Subscribe(ctx context.Context, subs []Subscription, props *Prop
 		return nil, err
 	}
 	filters := make(packets.Subscriptions, len(subs))
+	v5 := c.version() == MQTT5
 	for i, sub := range subs {
 		filters[i] = packets.Subscription{Filter: sub.Topic, Qos: sub.QoS}
-		if c.opts.ProtocolVersion == MQTT5 {
+		if v5 {
 			filters[i].NoLocal = sub.NoLocal
 			filters[i].RetainAsPublished = sub.RetainAsPublished
 			filters[i].RetainHandling = sub.RetainHandling
@@ -98,7 +99,7 @@ func (c *Client) checkSubscribe(subs []Subscription, props *Properties) error {
 }
 
 func (c *Client) checkSubUnsubProperties(props *Properties) error {
-	if props != nil && c.opts.ProtocolVersion != MQTT5 {
+	if props != nil && c.version() != MQTT5 {
 		return fmt.Errorf("%w: properties require MQTT 5", ErrNotSupported)
 	}
 	return nil
@@ -108,10 +109,9 @@ func (c *Client) checkSubUnsubProperties(props *Properties) error {
 // for its acknowledgement.
 func (c *Client) sendSubUnsub(ctx context.Context, typ byte, filters packets.Subscriptions, props *Properties) (*Pending, error) {
 	pk := packets.Packet{
-		FixedHeader:     packets.FixedHeader{Type: typ, Qos: 1}, // flags 0010 [MQTT-3.8.1-1] [MQTT-3.10.1-1]
-		ProtocolVersion: c.opts.ProtocolVersion,
-		Filters:         filters,
-		PacketID:        1, // for the size check; replaced below
+		FixedHeader: packets.FixedHeader{Type: typ, Qos: 1}, // flags 0010 [MQTT-3.8.1-1] [MQTT-3.10.1-1]
+		Filters:     filters,
+		PacketID:    1, // for the size check; replaced below
 	}
 	if props != nil {
 		pk.Properties = *props
@@ -127,6 +127,7 @@ func (c *Client) sendSubUnsub(ctx context.Context, typ byte, filters packets.Sub
 	if s.cn == nil {
 		return nil, ErrNoConn
 	}
+	pk.ProtocolVersion = s.cn.version
 	if err := s.checkSize(&pk); err != nil {
 		return nil, err
 	}

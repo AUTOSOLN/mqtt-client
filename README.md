@@ -6,11 +6,15 @@ built on the [comqtt](https://github.com/AUTOSOLN/comqtt) packet codec.
 
 ```go
 c, err := mqttclient.New(mqttclient.Options{
-	Address:         "localhost:1883",
-	ProtocolVersion: mqttclient.MQTT5,
-	ClientID:        "example",
-	CleanStart:      true,
-	KeepAlive:       60,
+	// Tried in order until one accepts, cycling; each server has its own
+	// connection settings.
+	Servers: []mqttclient.Server{{
+		Address:         "localhost:1883",
+		ProtocolVersion: mqttclient.MQTT5,
+		ClientID:        "example",
+		CleanStart:      true,
+		KeepAlive:       60,
+	}},
 }, mqttclient.Handlers{
 	OnDisconnect: func(_ *mqttclient.Client, ev mqttclient.DisconnectEvent) {
 		log.Println("disconnected:", ev.Err)

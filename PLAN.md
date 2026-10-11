@@ -156,11 +156,12 @@ callbacks are queued.
 
 ```go
 func New(opts Options, h Handlers) (*Client, error)               // mosquitto_new + option setters
-func (c *Client) Connect(ctx context.Context) (ConnAck, error)    // dial, CONNECT, wait for CONNACK; no reconnect
+func (c *Client) Connect(ctx context.Context) (ConnAck, error)    // dial, CONNECT, wait for CONNACK; one pass over Servers; no reconnect
 func (c *Client) Disconnect(ctx context.Context, reason byte, props *Properties) error  // mosquitto_disconnect_v5; waits for teardown
 func (c *Client) SetCredentials(username string, password []byte) error               // mosquitto_username_pw_set
 func (c *Client) SetWill(w *Message) error                                            // will_set_v5; nil = will_clear
-func (c *Client) ClientID() string                                                    // includes a server-assigned id
+func (c *Client) ClientID() string                                                    // current server's; includes a server-assigned id
+func (c *Client) ServerIndex() int                                                    // index in Options.Servers of the current server
 func (c *Client) IsConnected() bool
 func (c *Client) Publish(ctx context.Context, m *Message) (*Pending, error)          // mosquitto_publish_v5 (phase 2)
 func (c *Client) Subscribe(ctx context.Context, subs []Subscription, props *Properties) (*Pending, error) // phase 3
@@ -194,16 +195,22 @@ type Message struct {
 }
 
 type Options struct {
+    Servers      []Server     // at least one; tried in order from the current one, cycling
+    Logger       *slog.Logger
+    NoTopicCheck bool         // skip topic checks (testing a server); the 65535-byte limit stays
+}
+
+type Server struct {          // everything that may differ from one server to the next
     Address           string        // host:port (IP or hostname); port required
     TLS               bool          // explicit; never inferred from the port
     ProtocolVersion   byte          // MQTT31, MQTT311 (default, as mosquitto), MQTT5
     ClientID          string        // empty only with CleanStart; MQTT31 gets a random mosq-… id
     CleanStart        bool
     KeepAlive         uint16        // seconds; 0 or >= 5
-    ReconnectDelay       time.Duration // Run (phase 4): default 1s
+    ReconnectDelay       time.Duration // Run (phase 4): default 1s; the wait before trying this server
     ReconnectDelayMax    time.Duration // default ReconnectDelay (a fixed 1s, as libmosquitto)
     ReconnectExponential bool          // delay*(n+1)^2 instead of delay*(n+1)
-    ConnectTimeout       time.Duration // each Run attempt, dial to CONNACK; default 30s
+    ConnectTimeout       time.Duration // each Connect/Run attempt to this server, dial to CONNACK; default 30s
     Username          string
     Password          []byte
     Will              *Message
@@ -211,7 +218,6 @@ type Options struct {
     ReceiveMaximum    uint16        // default 20; always sent in MQTT 5 CONNECT, as mosquitto does
     MaxInflight       uint16        // default 20; outbound QoS 1/2 in flight unless the server sends Receive Maximum
     TLSConfig         *tls.Config
-    Logger            *slog.Logger
 }
 
 type Handlers struct {
@@ -233,8 +239,17 @@ type DisconnectEvent struct {
 }
 ```
 
-`Address` is a single host:port rather than a list: mosquitto connects to one host, and so does swarmy.
-TLS is a separate flag, never inferred from the port.
+`Servers` is a list, unlike mosquitto's single host, so that a bridge can fail over across the
+remote side's brokers (broker ADR-012 §5.2) without losing its session. The client has one current
+server (`ServerIndex`). `Connect` tries each server once from the current one. `Run` moves to the
+next server, cycling, after a failed attempt, and retries the same server first after an accepted
+connection is lost. A server that fails permanently (non-transient refusal, protocol error,
+certificate verification) is not tried again during that `Run`, and `Run` returns once all have.
+Backoff counts and delays are per server. The session (queued and in-flight QoS 1/2) belongs to the
+client, so it is resent to whichever server is reached, encoded for that server's protocol
+version. `SetCredentials` and `SetWill` change the current server's values; from `OnPreConnect`
+that is the server about to be tried. Each server keeps its own client id, which an MQTT 5 server may
+assign. TLS is a separate flag per server, never inferred from the port.
 
 Publish follows `mosquitto_publish_v5`. Every message takes a mid, QoS 0 included. Argument
 errors (`ErrInvalid`), a QoS above the server's Maximum QoS (`ErrQoSNotSupported`) and a packet

@@ -25,64 +25,64 @@ import (
 // cases maps a mosquitto test name to its client program.
 var cases = map[string]func(port int) int{
 	"01-con-discon-success": func(port int) int {
-		return connectDisconnect(port, mqttclient.Options{ClientID: "01-con-discon-success", CleanStart: true, KeepAlive: 60}, nil)
+		return connectDisconnect(port, mqttclient.Server{ClientID: "01-con-discon-success", CleanStart: true, KeepAlive: 60}, nil)
 	},
 	"01-con-discon-success-v5": func(port int) int {
-		return connectDisconnect(port, mqttclient.Options{
+		return connectDisconnect(port, mqttclient.Server{
 			ClientID: "01-con-discon-success-v5", CleanStart: true, KeepAlive: 60, ProtocolVersion: mqttclient.MQTT5,
 			ConnectProperties: &mqttclient.Properties{MaximumPacketSize: 1000},
 		}, nil)
 	},
 	"01-con-discon-will": func(port int) int {
-		return connectDisconnect(port, mqttclient.Options{
+		return connectDisconnect(port, mqttclient.Server{
 			ClientID: "01-con-discon-will", CleanStart: true, KeepAlive: 60,
 			Will: &mqttclient.Message{Topic: "will/topic", Payload: []byte("will-payload"), QoS: 1, Retain: true},
 		}, nil)
 	},
 	"01-con-discon-will-v5": func(port int) int {
-		return connectDisconnect(port, mqttclient.Options{
+		return connectDisconnect(port, mqttclient.Server{
 			ClientID: "01-con-discon-will", CleanStart: true, KeepAlive: 60, ProtocolVersion: mqttclient.MQTT5,
 			Will: &mqttclient.Message{Topic: "will/topic", Payload: []byte("will-payload"), QoS: 1, Retain: true,
 				Properties: &mqttclient.Properties{PayloadFormat: 1, PayloadFormatFlag: true}},
 		}, nil)
 	},
 	"01-con-discon-will-clear": func(port int) int {
-		return connectDisconnect(port, mqttclient.Options{
+		return connectDisconnect(port, mqttclient.Server{
 			ClientID: "01-con-discon-will", CleanStart: true, KeepAlive: 60,
 			Will: &mqttclient.Message{Topic: "will/topic", Payload: []byte("will-payload"), QoS: 1, Retain: true},
 		}, func(c *mqttclient.Client) error { return c.SetWill(nil) })
 	},
 	"01-keepalive-pingreq": func(port int) int {
-		return connectStay(port, mqttclient.Options{ClientID: "01-keepalive-pingreq", CleanStart: true, KeepAlive: 5})
+		return connectStay(port, mqttclient.Server{ClientID: "01-keepalive-pingreq", CleanStart: true, KeepAlive: 5})
 	},
 	"01-server-keepalive-pingreq": func(port int) int {
-		return connectStay(port, mqttclient.Options{
+		return connectStay(port, mqttclient.Server{
 			ClientID: "01-server-keepalive-pingreq", CleanStart: true, KeepAlive: 60, ProtocolVersion: mqttclient.MQTT5,
 		})
 	},
 	"01-no-clean-session": func(port int) int {
-		return connectDisconnect(port, mqttclient.Options{ClientID: "01-no-clean-session", KeepAlive: 60}, nil)
+		return connectDisconnect(port, mqttclient.Server{ClientID: "01-no-clean-session", KeepAlive: 60}, nil)
 	},
 	"01-unpwd-set": func(port int) int {
-		return connectDisconnect(port, mqttclient.Options{ClientID: "01-unpwd-set", CleanStart: true, KeepAlive: 60}, func(c *mqttclient.Client) error {
+		return connectDisconnect(port, mqttclient.Server{ClientID: "01-unpwd-set", CleanStart: true, KeepAlive: 60}, func(c *mqttclient.Client) error {
 			return c.SetCredentials("uname", []byte(";'[08gn=#"))
 		})
 	},
 	"01-will-set": func(port int) int {
-		return connectDisconnect(port, mqttclient.Options{
+		return connectDisconnect(port, mqttclient.Server{
 			ClientID: "01-will-set", CleanStart: true, KeepAlive: 60,
 			Will: &mqttclient.Message{Topic: "topic/on/unexpected/disconnect", Payload: []byte("will message"), QoS: 1, Retain: true},
 		}, nil)
 	},
 	"01-will-unpwd-set": func(port int) int {
-		return connectDisconnect(port, mqttclient.Options{
+		return connectDisconnect(port, mqttclient.Server{
 			ClientID: "01-will-unpwd-set", CleanStart: true, KeepAlive: 60,
 			Username: "oibvvwqw", Password: []byte("#'^2hg9a&nm38*us"),
 			Will: &mqttclient.Message{Topic: "will-topic", Payload: []byte("will message"), QoS: 2},
 		}, nil)
 	},
 	"01-pre-connect-callback": func(port int) int {
-		return run(port, mqttclient.Options{ClientID: "01-pre-connect", CleanStart: true, KeepAlive: 60}, nil, mqttclient.Handlers{
+		return run(port, mqttclient.Server{ClientID: "01-pre-connect", CleanStart: true, KeepAlive: 60}, nil, mqttclient.Handlers{
 			OnPreConnect: func(c *mqttclient.Client) { _ = c.SetCredentials("uname", []byte(";'[08gn=#")) },
 		}, false)
 	},
@@ -90,17 +90,17 @@ var cases = map[string]func(port int) int{
 
 // connectDisconnect is the shape of most 01-* programs: connect, and on a
 // successful CONNACK disconnect again. setup runs after New, before Connect.
-func connectDisconnect(port int, opts mqttclient.Options, setup func(*mqttclient.Client) error) int {
+func connectDisconnect(port int, opts mqttclient.Server, setup func(*mqttclient.Client) error) int {
 	return run(port, opts, setup, mqttclient.Handlers{}, false)
 }
 
 // connectStay connects and stays connected until the test broker closes the
 // connection.
-func connectStay(port int, opts mqttclient.Options) int {
+func connectStay(port int, opts mqttclient.Server) int {
 	return run(port, opts, nil, mqttclient.Handlers{}, true)
 }
 
-func run(port int, opts mqttclient.Options, setup func(*mqttclient.Client) error, h mqttclient.Handlers, stay bool) int {
+func run(port int, opts mqttclient.Server, setup func(*mqttclient.Client) error, h mqttclient.Handlers, stay bool) int {
 	opts.Address = fmt.Sprintf("localhost:%d", port)
 	done := make(chan int, 1)
 	h.OnConnect = func(c *mqttclient.Client, ack mqttclient.ConnAck) {
@@ -119,7 +119,7 @@ func run(port int, opts mqttclient.Options, setup func(*mqttclient.Client) error
 		}
 		done <- 0
 	}
-	c, err := mqttclient.New(opts, h)
+	c, err := mqttclient.New(mqttclient.Options{Servers: []mqttclient.Server{opts}}, h)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

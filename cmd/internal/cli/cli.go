@@ -48,7 +48,7 @@ type ConnFlags struct {
 
 // Register adds the connection flags to fs.
 func (f *ConnFlags) Register(fs *flag.FlagSet) {
-	fs.StringVar(&f.Address, "address", "localhost:1883", "broker address as host:port")
+	fs.StringVar(&f.Address, "address", "localhost:1883", "broker address as host:port, or a comma-separated list tried in turn")
 	fs.BoolVar(&f.TLS, "tls", false, "connect with TLS")
 	fs.StringVar(&f.Version, "v", "311", "MQTT protocol version: 31, 311 or 5")
 	fs.StringVar(&f.ClientID, "id", "", "client id (empty requires -clean)")
@@ -121,8 +121,7 @@ func (f *ConnFlags) Options() (mqttclient.Options, error) {
 	if err != nil {
 		return mqttclient.Options{}, err
 	}
-	opts := mqttclient.Options{
-		Address:         f.Address,
+	srv := mqttclient.Server{
 		TLS:             f.TLS,
 		ProtocolVersion: version,
 		ClientID:        f.ClientID,
@@ -130,24 +129,28 @@ func (f *ConnFlags) Options() (mqttclient.Options, error) {
 		KeepAlive:       uint16(f.KeepAlive),
 		Username:        f.Username,
 		TLSConfig:       tc,
-		NoTopicCheck:    f.NoTopicCheck,
 	}
 	if f.Password != "" {
-		opts.Password = []byte(f.Password)
+		srv.Password = []byte(f.Password)
 	}
 	if f.SessionExpiry > 0 {
 		if version != mqttclient.MQTT5 {
-			return opts, errors.New("-session-expiry requires -v 5")
+			return mqttclient.Options{}, errors.New("-session-expiry requires -v 5")
 		}
-		opts.ConnectProperties = &mqttclient.Properties{SessionExpiryInterval: uint32(f.SessionExpiry), SessionExpiryIntervalFlag: true}
+		srv.ConnectProperties = &mqttclient.Properties{SessionExpiryInterval: uint32(f.SessionExpiry), SessionExpiryIntervalFlag: true}
 	}
 	if f.WillTopic != "" {
-		opts.Will = &mqttclient.Message{
+		srv.Will = &mqttclient.Message{
 			Topic:   f.WillTopic,
 			Payload: []byte(f.WillPayload),
 			QoS:     byte(f.WillQoS),
 			Retain:  f.WillRetain,
 		}
+	}
+	opts := mqttclient.Options{NoTopicCheck: f.NoTopicCheck}
+	for _, addr := range strings.Split(f.Address, ",") {
+		srv.Address = strings.TrimSpace(addr)
+		opts.Servers = append(opts.Servers, srv)
 	}
 	if f.Debug {
 		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -172,12 +175,15 @@ func (r *ReconnectFlags) Register(fs *flag.FlagSet) {
 	fs.DurationVar(&r.ConnectTimeout, "connect-timeout", 30*time.Second, "limit for each connection attempt")
 }
 
-// Apply sets the reconnect options.
+// Apply sets the reconnect options of every server.
 func (r *ReconnectFlags) Apply(o *mqttclient.Options) {
-	o.ReconnectDelay = r.Delay
-	o.ReconnectDelayMax = r.DelayMax
-	o.ReconnectExponential = r.Exponential
-	o.ConnectTimeout = r.ConnectTimeout
+	for i := range o.Servers {
+		s := &o.Servers[i]
+		s.ReconnectDelay = r.Delay
+		s.ReconnectDelayMax = r.DelayMax
+		s.ReconnectExponential = r.Exponential
+		s.ConnectTimeout = r.ConnectTimeout
+	}
 }
 
 // Session is a client whose OnConnect, OnDisconnect and OnConnectError are
@@ -200,7 +206,7 @@ func NewSession(f *ConnFlags, h mqttclient.Handlers, more ...func(*mqttclient.Op
 	for _, m := range more {
 		m(&opts)
 	}
-	s := &Session{Version: opts.ProtocolVersion, timeout: f.Timeout, lost: make(chan mqttclient.DisconnectEvent, 1)}
+	s := &Session{Version: opts.Servers[0].ProtocolVersion, timeout: f.Timeout, lost: make(chan mqttclient.DisconnectEvent, 1)}
 	onConnect, onDisconnect, onConnectError := h.OnConnect, h.OnDisconnect, h.OnConnectError
 	h.OnConnectError = func(c *mqttclient.Client, err error) {
 		Logf("OnConnectError %v", err)

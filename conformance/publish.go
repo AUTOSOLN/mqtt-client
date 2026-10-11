@@ -28,7 +28,7 @@ func finish(rc int) {
 // client connects with opts and h and waits for finish. Without an
 // OnDisconnect handler, a clean disconnect finishes with 0 and a lost
 // connection with 1.
-func client(port int, opts mqttclient.Options, h mqttclient.Handlers) int {
+func client(port int, opts mqttclient.Server, h mqttclient.Handlers) int {
 	opts.Address = fmt.Sprintf("localhost:%d", port)
 	opts.CleanStart = true
 	if opts.KeepAlive == 0 {
@@ -44,7 +44,7 @@ func client(port int, opts mqttclient.Options, h mqttclient.Handlers) int {
 			finish(0)
 		}
 	}
-	c, err := mqttclient.New(opts, h)
+	c, err := mqttclient.New(mqttclient.Options{Servers: []mqttclient.Server{opts}}, h)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -59,13 +59,13 @@ func client(port int, opts mqttclient.Options, h mqttclient.Handlers) int {
 // runForever is client for the programs that use mosquitto_loop_forever:
 // Run keeps the connection up, reconnecting after a loss, and the program
 // ends when Run returns (after Disconnect).
-func runForever(port int, opts mqttclient.Options, h mqttclient.Handlers) int {
+func runForever(port int, opts mqttclient.Server, h mqttclient.Handlers) int {
 	opts.Address = fmt.Sprintf("localhost:%d", port)
 	opts.CleanStart = true
 	if opts.KeepAlive == 0 {
 		opts.KeepAlive = 60
 	}
-	c, err := mqttclient.New(opts, h)
+	c, err := mqttclient.New(mqttclient.Options{Servers: []mqttclient.Server{opts}}, h)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -78,7 +78,7 @@ func runForever(port int, opts mqttclient.Options, h mqttclient.Handlers) int {
 }
 
 // starter is client or runForever.
-type starter func(port int, opts mqttclient.Options, h mqttclient.Handlers) int
+type starter func(port int, opts mqttclient.Server, h mqttclient.Handlers) int
 
 func connect(c *mqttclient.Client) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -113,7 +113,7 @@ func expectMessage(m *mqttclient.Message, mid uint16, qos byte, topic, payload s
 }
 
 // receive is a b2c program: check the first message, then call next.
-func receive(port int, opts mqttclient.Options, mid uint16, qos byte, topic string, next func(c *mqttclient.Client)) int {
+func receive(port int, opts mqttclient.Server, mid uint16, qos byte, topic string, next func(c *mqttclient.Client)) int {
 	return client(port, opts, mqttclient.Handlers{
 		OnMessage: func(c *mqttclient.Client, m *mqttclient.Message) {
 			if err := expectMessage(m, mid, qos, topic, "message"); err != nil {
@@ -129,14 +129,14 @@ func receive(port int, opts mqttclient.Options, mid uint16, qos byte, topic stri
 // connected (the script checks the client ignores the acknowledgement and
 // still sends PINGREQ) until the connection ends.
 func unexpectedAck(port int, id string) int {
-	return client(port, mqttclient.Options{ClientID: id, KeepAlive: 5}, mqttclient.Handlers{
+	return client(port, mqttclient.Server{ClientID: id, KeepAlive: 5}, mqttclient.Handlers{
 		OnDisconnect: func(*mqttclient.Client, mqttclient.DisconnectEvent) { finish(0) },
 	})
 }
 
 // publishThenDisconnect publishes one message on connect and disconnects
 // once it is complete.
-func publishThenDisconnect(port int, opts mqttclient.Options, topic, payload string, qos byte, props *mqttclient.Properties) int {
+func publishThenDisconnect(port int, opts mqttclient.Server, topic, payload string, qos byte, props *mqttclient.Properties) int {
 	return client(port, opts, mqttclient.Handlers{
 		OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) {
 			if _, err := publish(c, topic, payload, qos, props); err != nil {
@@ -150,7 +150,7 @@ func publishThenDisconnect(port int, opts mqttclient.Options, topic, payload str
 
 // publishMany publishes n messages on connect and finishes when the last is
 // complete, as the receive-maximum programs do.
-func publishMany(port int, opts mqttclient.Options, n int, qos byte) int {
+func publishMany(port int, opts mqttclient.Server, n int, qos byte) int {
 	return client(port, opts, mqttclient.Handlers{
 		OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) {
 			for range n {
@@ -173,7 +173,7 @@ func publishMany(port int, opts mqttclient.Options, n int, qos byte) int {
 // reconnects and resends the message (mosquitto_loop_forever).
 func publishReconnect(port int, id string, qos byte, topic string) int {
 	first := true
-	return runForever(port, mqttclient.Options{ClientID: id}, mqttclient.Handlers{
+	return runForever(port, mqttclient.Server{ClientID: id}, mqttclient.Handlers{
 		OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) {
 			if first {
 				first = false
@@ -191,7 +191,7 @@ func publishReconnect(port int, id string, qos byte, topic string) int {
 // max, checking which are refused, and disconnects when the last is done.
 func maximumQoS(port int, max byte) int {
 	rc := 0
-	return client(port, mqttclient.Options{ClientID: "publish-qos2-test", ProtocolVersion: mqttclient.MQTT5}, mqttclient.Handlers{
+	return client(port, mqttclient.Server{ClientID: "publish-qos2-test", ProtocolVersion: mqttclient.MQTT5}, mqttclient.Handlers{
 		OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) {
 			for _, qos := range []byte{2, 1, 0} {
 				_, err := publish(c, "maximum/qos/qos"+strconv.Itoa(int(qos)), "message", qos, nil)
@@ -213,7 +213,7 @@ func maximumQoS(port int, max byte) int {
 
 // sendOnce publishes one QoS 0 message and disconnects when OnPublish
 // reports its mid.
-func sendOnce(start starter, port int, opts mqttclient.Options, topic, payload string, props *mqttclient.Properties) int {
+func sendOnce(start starter, port int, opts mqttclient.Server, topic, payload string, props *mqttclient.Properties) int {
 	var sent uint16
 	return start(port, opts, mqttclient.Handlers{
 		OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) {
@@ -240,16 +240,16 @@ func init() {
 		"03-publish-b2c-qos1-unexpected-puback":  func(port int) int { return unexpectedAck(port, "publish-qos1-test") },
 		"03-publish-b2c-qos2-unexpected-pubcomp": func(port int) int { return unexpectedAck(port, "publish-qos2-test") },
 		"03-publish-b2c-qos1": func(port int) int {
-			return receive(port, mqttclient.Options{ClientID: "publish-qos1-test"}, 123, 1, "pub/qos1/receive", func(*mqttclient.Client) { finish(0) })
+			return receive(port, mqttclient.Server{ClientID: "publish-qos1-test"}, 123, 1, "pub/qos1/receive", func(*mqttclient.Client) { finish(0) })
 		},
 		"03-publish-b2c-qos2": func(port int) int {
-			return receive(port, mqttclient.Options{ClientID: "publish-qos2-test"}, 13423, 2, "pub/qos2/receive", func(*mqttclient.Client) { finish(0) })
+			return receive(port, mqttclient.Server{ClientID: "publish-qos2-test"}, 13423, 2, "pub/qos2/receive", func(*mqttclient.Client) { finish(0) })
 		},
 		"03-publish-b2c-qos2-len": func(port int) int {
-			return receive(port, mqttclient.Options{ClientID: "publish-qos2-test", ProtocolVersion: v5}, 56, 2, "len/qos2/test", disconnect)
+			return receive(port, mqttclient.Server{ClientID: "publish-qos2-test", ProtocolVersion: v5}, 56, 2, "len/qos2/test", disconnect)
 		},
 		"03-publish-b2c-qos2-unexpected-pubrel": func(port int) int {
-			return client(port, mqttclient.Options{ClientID: "publish-qos2-test"}, mqttclient.Handlers{
+			return client(port, mqttclient.Server{ClientID: "publish-qos2-test"}, mqttclient.Handlers{
 				OnMessage: func(_ *mqttclient.Client, m *mqttclient.Message) {
 					if m.Topic == "quit" {
 						finish(0)
@@ -269,24 +269,24 @@ func init() {
 			return publishReconnect(port, "publish-qos2-test", 2, "pub/qos2/test")
 		},
 		"03-publish-c2b-qos1-len": func(port int) int {
-			return publishThenDisconnect(port, mqttclient.Options{ClientID: "publish-qos1-test", ProtocolVersion: v5}, "pub/qos1/test", "message", 1, nil)
+			return publishThenDisconnect(port, mqttclient.Server{ClientID: "publish-qos1-test", ProtocolVersion: v5}, "pub/qos1/test", "message", 1, nil)
 		},
 		"03-publish-c2b-qos2-len": func(port int) int {
-			return publishThenDisconnect(port, mqttclient.Options{ClientID: "publish-qos2-test", ProtocolVersion: v5}, "pub/qos2/test", "message", 2, nil)
+			return publishThenDisconnect(port, mqttclient.Server{ClientID: "publish-qos2-test", ProtocolVersion: v5}, "pub/qos2/test", "message", 2, nil)
 		},
 		"03-publish-c2b-qos2": func(port int) int {
-			return publishThenDisconnect(port, mqttclient.Options{ClientID: "publish-qos2-test"}, "pub/qos2/test", "message", 2, nil)
+			return publishThenDisconnect(port, mqttclient.Server{ClientID: "publish-qos2-test"}, "pub/qos2/test", "message", 2, nil)
 		},
 		"03-publish-c2b-qos1-receive-maximum": func(port int) int {
-			return publishMany(port, mqttclient.Options{ClientID: "publish-qos1-test", ProtocolVersion: v5}, 6, 1)
+			return publishMany(port, mqttclient.Server{ClientID: "publish-qos1-test", ProtocolVersion: v5}, 6, 1)
 		},
 		"03-publish-c2b-qos2-receive-maximum": func(port int) int {
-			return publishMany(port, mqttclient.Options{ClientID: "publish-qos2-test", ProtocolVersion: v5}, 5, 2)
+			return publishMany(port, mqttclient.Server{ClientID: "publish-qos2-test", ProtocolVersion: v5}, 5, 2)
 		},
 		"03-publish-c2b-qos2-maximum-qos-0": func(port int) int { return maximumQoS(port, 0) },
 		"03-publish-c2b-qos2-maximum-qos-1": func(port int) int { return maximumQoS(port, 1) },
 		"03-publish-c2b-qos2-pubrec-error": func(port int) int {
-			return client(port, mqttclient.Options{ClientID: "publish-qos2-test", ProtocolVersion: v5}, mqttclient.Handlers{
+			return client(port, mqttclient.Server{ClientID: "publish-qos2-test", ProtocolVersion: v5}, mqttclient.Handlers{
 				OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) {
 					_, _ = publish(c, "topic", "rejected", 2, nil)
 					_, _ = publish(c, "topic", "accepted", 2, nil)
@@ -300,24 +300,24 @@ func init() {
 		},
 		"03-publish-qos0": func(port int) int {
 			// The C program uses mosquitto_loop_forever.
-			return sendOnce(runForever, port, mqttclient.Options{ClientID: "publish-qos0-test"}, "pub/qos0/test", "message", nil)
+			return sendOnce(runForever, port, mqttclient.Server{ClientID: "publish-qos0-test"}, "pub/qos0/test", "message", nil)
 		},
 		"03-publish-qos0-no-payload": func(port int) int {
-			return sendOnce(client, port, mqttclient.Options{ClientID: "publish-qos0-test-np"}, "pub/qos0/no-payload/test", "", nil)
+			return sendOnce(client, port, mqttclient.Server{ClientID: "publish-qos0-test-np"}, "pub/qos0/no-payload/test", "", nil)
 		},
 		"11-prop-send-content-type": func(port int) int {
-			return sendOnce(client, port, mqttclient.Options{ClientID: "prop-test", ProtocolVersion: v5}, "prop/qos0", "message",
+			return sendOnce(client, port, mqttclient.Server{ClientID: "prop-test", ProtocolVersion: v5}, "prop/qos0", "message",
 				&mqttclient.Properties{ContentType: "application/json"})
 		},
 		"11-prop-send-payload-format": func(port int) int {
-			return sendOnce(client, port, mqttclient.Options{ClientID: "prop-test", ProtocolVersion: v5}, "prop/qos0", "message",
+			return sendOnce(client, port, mqttclient.Server{ClientID: "prop-test", ProtocolVersion: v5}, "prop/qos0", "message",
 				&mqttclient.Properties{PayloadFormat: 1})
 		},
 		"11-prop-oversize-packet": func(port int) int {
 			// The payloads are one byte shorter than in mosquitto's script:
 			// see overrides/11-prop-oversize-packet.py.
 			var sent uint16
-			return client(port, mqttclient.Options{ClientID: "publish-qos0-test", ProtocolVersion: v5}, mqttclient.Handlers{
+			return client(port, mqttclient.Server{ClientID: "publish-qos0-test", ProtocolVersion: v5}, mqttclient.Handlers{
 				OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) {
 					const long = "0123456789012345678901234567890"
 					if _, err := c.Subscribe(context.Background(), []mqttclient.Subscription{{Topic: long}}, nil); !errors.Is(err, mqttclient.ErrOversizePacket) {
@@ -353,7 +353,7 @@ func init() {
 			if len(os.Args) > 2 {
 				qos, _ = strconv.Atoi(os.Args[2])
 			}
-			return client(port, mqttclient.Options{ClientID: "prop-test", ProtocolVersion: v5}, mqttclient.Handlers{
+			return client(port, mqttclient.Server{ClientID: "prop-test", ProtocolVersion: v5}, mqttclient.Handlers{
 				OnMessage: func(c *mqttclient.Client, m *mqttclient.Message) {
 					if p := m.Properties; p != nil && p.ContentType == "plain/text" && p.ResponseTopic == "msg/123" && int(m.QoS) == qos {
 						_, _ = publish(c, "ok", "ok", 0, nil)
