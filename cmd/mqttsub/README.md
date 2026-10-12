@@ -162,5 +162,6 @@ To see a refused filter, use a mosquitto ACL that denies the topic. The SUBACK s
 ### Subscriptions after a lost connection
 
 SUBSCRIBE is not queued or resent, as in libmosquitto. A Subscribe still waiting for SUBACK when
-the connection drops fails with the connection's error. Phase 4 adds automatic reconnect, with
-re-subscribing from `OnConnect`.
+the connection drops fails with the connection's error. `mqttsub` uses `Client.Connect` and does
+not reconnect: it exits with `connection lost`. For automatic reconnect with re-subscribing from
+`OnConnect` (`Client.Run`, phase 4), see [interactiveclient](../interactiveclient/README.md).

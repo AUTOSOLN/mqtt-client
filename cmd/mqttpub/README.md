@@ -199,7 +199,8 @@ well as `mosquitto_sub`.
 connections. On the next successful `Connect`, it resends them with DUP set, or resends PUBREL if
 PUBREC had already arrived. The unit test `TestResendAfterReconnect` and the conformance cases
 `03-publish-c2b-qos1-disconnect` and `03-publish-c2b-qos2-disconnect` cover this behaviour.
-Automatic reconnect comes in phase 4.
+For automatic reconnect (`Client.Run`, phase 4), see
+[interactiveclient](../interactiveclient/README.md).
 
 ### Failure cases
 
