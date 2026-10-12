@@ -1,0 +1,61 @@
+version: 2
+
+project_name: mqtt-client
+
+builds:
+  - &defaults
+    id: mqttpub
+    main: ./cmd/mqttpub
+    binary: mqttpub
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: ["-s -w"]
+    goos: [linux, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+  - <<: *defaults
+    id: mqttsub
+    main: ./cmd/mqttsub
+    binary: mqttsub
+  - <<: *defaults
+    id: mqttconnect
+    main: ./cmd/mqttconnect
+    binary: mqttconnect
+  - <<: *defaults
+    id: interactiveclient
+    main: ./cmd/interactiveclient
+    binary: interactiveclient
+  - <<: *defaults
+    id: mqttfuzz
+    main: ./cmd/mqttfuzz
+    binary: mqttfuzz
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - src: cmd/brokers.example.yaml
+        strip_parent: true
+      - src: cmd/interactiveclient/README.md
+        dst: README-interactiveclient.md
+      - src: cmd/mqttconnect/README.md
+        dst: README-mqttconnect.md
+      - src: cmd/mqttfuzz/README.md
+        dst: README-mqttfuzz.md
+      - src: cmd/mqttpub/README.md
+        dst: README-mqttpub.md
+      - src: cmd/mqttsub/README.md
+        dst: README-mqttsub.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
