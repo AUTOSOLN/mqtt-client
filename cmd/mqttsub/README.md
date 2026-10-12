@@ -27,8 +27,8 @@ go build -o build/mqttsub ./cmd/mqttsub
 ## Flags
 
 The connection flags are listed in the [mqttpub README](../mqttpub/README.md#flags). They are
-`-server`, `-v`, `-id`, `-clean`, `-session-expiry`, `-keepalive`, `-u`, `-P`, `-timeout`,
-`-debug`, `-no-topic-check`, the TLS flags and the Will flags. With `-no-topic-check`, an
+`-address`, `-tls`, `-v`, `-id`, `-clean`, `-session-expiry`, `-keepalive`, `-u`, `-P`, `-timeout`,
+`-debug`, `-no-topic-check`, `-config`, the TLS flags and the Will flags. With `-no-topic-check`, an
 invalid filter such as `a/#/+/b` is sent to the broker as given instead of being refused. `-timeout` also limits how long the tool waits for
 SUBACK and UNSUBACK.
 
@@ -162,5 +162,15 @@ To see a refused filter, use a mosquitto ACL that denies the topic. The SUBACK s
 ### Subscriptions after a lost connection
 
 SUBSCRIBE is not queued or resent, as in libmosquitto. A Subscribe still waiting for SUBACK when
-the connection drops fails with the connection's error. Phase 4 adds automatic reconnect, with
-re-subscribing from `OnConnect`.
+the connection drops fails with the connection's error. Without `-config`, `mqttsub` uses
+`Client.Connect` and does not reconnect: it exits with `connection lost`.
+
+With `-config` (see [Several brokers](../mqttpub/README.md#several-brokers--config)) it uses
+`Client.Run`: it reconnects, failing over between the brokers in the file, and subscribes to the
+`-t` filters again from `OnConnect` after every reconnect, since a broker it fails over to has no
+subscriptions for it. The log shows `SUBACK … (resubscribed)`. Messages published while it was
+disconnected are lost unless the broker kept a persistent session (`-clean=false`).
+
+```sh
+build/mqttsub -config cmd/brokers.example.yaml -t 'test/#' -q 1
+```

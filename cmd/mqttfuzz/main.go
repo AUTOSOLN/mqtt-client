@@ -9,7 +9,7 @@
 //
 // Usage:
 //
-//	mqttfuzz -f scenario.yaml [-server URL] [-v 5] [-set name=value ...]
+//	mqttfuzz -f scenario.yaml [-address host:port] [-tls] [-v 5] [-set name=value ...]
 //
 // Tokens: write ${name} anywhere in the scenario. Values come from the
 // scenario's vars:, overridden by -set name=value. Built-ins: ${rand} (a
@@ -48,7 +48,8 @@ func main() { os.Exit(run()) }
 func run() int {
 	var (
 		file        = flag.String("f", "", "scenario YAML file (required)")
-		server      = flag.String("server", "", "broker URL (overrides the scenario's server:, default mqtt://localhost:1883)")
+		address     = flag.String("address", "", "broker address as host:port (overrides the scenario's address:, default localhost:1883)")
+		useTLS      = flag.Bool("tls", false, "connect with TLS (overrides the scenario's tls:)")
 		version     = flag.String("v", "", "protocol version 31|311|5 (overrides the scenario's version:)")
 		recvTimeout = flag.Duration("recv-timeout", 2*time.Second, "default wait for a recv/expect-close step")
 		dialTimeout = flag.Duration("dial-timeout", 10*time.Second, "connection (and TLS handshake) timeout")
@@ -81,13 +82,19 @@ func run() int {
 		return 2
 	}
 
-	addr := sc.Server
-	if *server != "" {
-		addr = *server
+	addr := sc.Address
+	if *address != "" {
+		addr = *address
 	}
 	if addr == "" {
-		addr = "mqtt://localhost:1883"
+		addr = "localhost:1883"
 	}
+	tlsOn := sc.TLS
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "tls" {
+			tlsOn = *useTLS
+		}
+	})
 
 	tc, err := tlsFlags.TLSConfig()
 	if err != nil {
@@ -98,8 +105,12 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	logf("mqttfuzz: %s  v%s  %d step(s)", addr, versionName(verByte), len(sc.Steps))
-	rc, err := dial(ctx, addr, tc, *dialTimeout, verByte)
+	scheme := "tcp"
+	if tlsOn {
+		scheme = "tls"
+	}
+	logf("mqttfuzz: %s %s  v%s  %d step(s)", scheme, addr, versionName(verByte), len(sc.Steps))
+	rc, err := dial(ctx, addr, tlsOn, tc, *dialTimeout, verByte)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mqttfuzz:", err)
 		return 2
@@ -126,7 +137,7 @@ func registerTLS(f *cli.ConnFlags) {
 	flag.StringVar(&f.CertFile, "cert", "", "PEM client certificate (TLS)")
 	flag.StringVar(&f.KeyFile, "key", "", "PEM client private key (TLS)")
 	flag.BoolVar(&f.Insecure, "insecure", false, "skip server certificate verification (TLS)")
-	flag.StringVar(&f.ServerName, "servername", "", "TLS server name, if different from the URL host")
+	flag.StringVar(&f.ServerName, "servername", "", "TLS server name, if different from the address host")
 }
 
 func versionName(v byte) string {

@@ -7,7 +7,8 @@ import (
 	"log/slog"
 	"math"
 	"net"
-	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -49,11 +50,38 @@ type Message struct {
 	Mid uint16
 }
 
-// Options configures a Client. Server is the only required field.
+// Options configures a Client. At least one server is required.
 type Options struct {
-	// Server is the broker URL: mqtt:// or tcp:// for plain TCP (default port
-	// 1883), mqtts://, ssl:// or tls:// for TLS (default port 8883).
-	Server string
+	// Servers are the brokers the client may connect to, each with its own
+	// connection settings. Connect and Run try them in order, starting from
+	// the current server (see Client.ServerIndex), and move on to the next
+	// one, cycling back to the first, when an attempt fails. The session
+	// (queued and in-flight QoS 1 and 2 messages) belongs to the client, so
+	// it carries over from one server to the next.
+	Servers []Server
+
+	// Logger receives debug output. Nil discards it.
+	Logger *slog.Logger
+
+	// NoTopicCheck turns off the topic name and topic filter checks (empty
+	// topic, UTF-8 rules, wildcard placement) for PUBLISH, SUBSCRIBE,
+	// UNSUBSCRIBE, the Will and received PUBLISH, so that a malformed topic
+	// goes to the server as given. Only the 65535-byte limit remains. It is
+	// meant for testing how a server handles invalid topics.
+	NoTopicCheck bool
+}
+
+// Server is one broker in Options.Servers and the settings used to connect
+// to it. Address is the only required field.
+type Server struct {
+	// Address is the broker as host:port, where host is an IP address or a
+	// hostname (an IPv6 address in brackets, "[::1]:1883"). The port is
+	// required.
+	Address string
+
+	// TLS connects with TLS rather than plain TCP. It is never inferred from
+	// the port.
+	TLS bool
 
 	// ProtocolVersion is MQTT31, MQTT311 or MQTT5. Zero means MQTT311, the
 	// libmosquitto default.
@@ -94,32 +122,25 @@ type Options struct {
 	MaxInflight uint16
 
 	// ReconnectDelay, ReconnectDelayMax and ReconnectExponential set how
-	// long Run waits before connecting again (mosquitto_reconnect_delay_set).
-	// The n-th consecutive wait (n from 0) is ReconnectDelay*(n+1), or
-	// ReconnectDelay*(n+1)*(n+1) with ReconnectExponential, capped at
-	// ReconnectDelayMax. A successful CONNACK resets n. Zero values mean 1s
-	// and ReconnectDelay, libmosquitto's defaults: a fixed 1s.
+	// long Run waits before connecting to this server again, or to it next
+	// after another server (mosquitto_reconnect_delay_set). The n-th
+	// consecutive wait before this server (n from 0) is ReconnectDelay*(n+1),
+	// or ReconnectDelay*(n+1)*(n+1) with ReconnectExponential, capped at
+	// ReconnectDelayMax. A successful CONNACK from this server resets its n.
+	// Zero values mean 1s and ReconnectDelay, libmosquitto's defaults: a
+	// fixed 1s.
 	ReconnectDelay       time.Duration
 	ReconnectDelayMax    time.Duration
 	ReconnectExponential bool
 
-	// ConnectTimeout bounds each of Run's connection attempts, from dialling
-	// to CONNACK. Zero means 30s.
+	// ConnectTimeout bounds each Connect or Run connection attempt to this
+	// server, from dialling to CONNACK. Zero means 30s.
 	ConnectTimeout time.Duration
 
-	// TLSConfig is used for mqtts/ssl/tls servers. If nil, a default
-	// configuration with ServerName set from the URL host is used.
+	// TLSConfig is used when TLS is set, and setting it without TLS is an
+	// error. If nil, a default configuration is used. An empty ServerName
+	// is set from the Address host.
 	TLSConfig *tls.Config
-
-	// Logger receives debug output. Nil discards it.
-	Logger *slog.Logger
-
-	// NoTopicCheck turns off the topic name and topic filter checks (empty
-	// topic, UTF-8 rules, wildcard placement) for PUBLISH, SUBSCRIBE,
-	// UNSUBSCRIBE, the Will and received PUBLISH, so that a malformed topic
-	// goes to the server as given. Only the 65535-byte limit remains. It is
-	// meant for testing how a server handles invalid topics.
-	NoTopicCheck bool
 }
 
 // Handlers are the client callbacks. They are called one at a time, in
@@ -129,8 +150,9 @@ type Options struct {
 // acknowledgement), since later callbacks queue behind them.
 type Handlers struct {
 	// OnPreConnect is called just before each network connection attempt,
-	// synchronously from Connect (mosquitto_pre_connect_callback_set). It may
-	// call SetCredentials or SetWill to change what is sent in CONNECT.
+	// synchronously from Connect or Run (mosquitto_pre_connect_callback_set).
+	// ServerIndex reports the server about to be tried, and SetCredentials
+	// and SetWill change what is sent to it in CONNECT.
 	OnPreConnect func(c *Client)
 
 	// OnConnect is called when CONNACK is received, whether the connection
@@ -142,9 +164,9 @@ type Handlers struct {
 	OnDisconnect func(c *Client, ev DisconnectEvent)
 
 	// OnConnectError is called by Run for every connection attempt that
-	// fails: the network connection, the TLS handshake, CONNACK not
-	// arriving within ConnectTimeout, or a refusal (which OnConnect and
-	// OnDisconnect also report).
+	// fails, whichever server it was to: the network connection, the TLS
+	// handshake, CONNACK not arriving within ConnectTimeout, or a refusal
+	// (which OnConnect and OnDisconnect also report).
 	OnConnectError func(c *Client, err error)
 
 	// OnMessage is called for every message received from the server: QoS 0
@@ -187,92 +209,97 @@ type DisconnectEvent struct {
 	Properties *Properties
 }
 
-// server is a parsed Options.Server.
-type server struct {
-	addr   string // host:port
-	host   string
-	useTLS bool
-}
-
-func parseServer(s string) (server, error) {
-	u, err := url.Parse(s)
+// splitAddress checks a Server.Address and returns its host.
+func splitAddress(addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return server{}, fmt.Errorf("%w: server %q: %v", ErrInvalid, s, err)
+		return "", fmt.Errorf("%w: address %q: %v", ErrInvalid, addr, err)
 	}
-	var sv server
-	port := "1883"
-	switch strings.ToLower(u.Scheme) {
-	case "mqtt", "tcp":
-	case "mqtts", "ssl", "tls":
-		sv.useTLS = true
-		port = "8883"
-	default:
-		return server{}, fmt.Errorf("%w: server %q: unsupported scheme %q", ErrInvalid, s, u.Scheme)
+	if host == "" {
+		return "", fmt.Errorf("%w: address %q: missing host", ErrInvalid, addr)
 	}
-	sv.host = u.Hostname()
-	if sv.host == "" {
-		return server{}, fmt.Errorf("%w: server %q: missing host", ErrInvalid, s)
+	if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+		return "", fmt.Errorf("%w: address %q: port must be 1-65535", ErrInvalid, addr)
 	}
-	if p := u.Port(); p != "" {
-		port = p
-	}
-	sv.addr = net.JoinHostPort(sv.host, port)
-	return sv, nil
+	return host, nil
 }
 
 // validate checks and normalises opts in place.
 func (o *Options) validate() error {
-	if o.ProtocolVersion == 0 {
-		o.ProtocolVersion = MQTT311
+	if len(o.Servers) == 0 {
+		return fmt.Errorf("%w: no servers", ErrInvalid)
 	}
-	switch o.ProtocolVersion {
+	o.Servers = slices.Clone(o.Servers)
+	for i := range o.Servers {
+		if err := o.Servers[i].validate(o.NoTopicCheck); err != nil {
+			if len(o.Servers) > 1 {
+				return fmt.Errorf("server %d (%s): %w", i, o.Servers[i].Address, err)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// validate checks and normalises s in place.
+func (s *Server) validate(noTopicCheck bool) error {
+	if _, err := splitAddress(s.Address); err != nil {
+		return err
+	}
+	if s.TLSConfig != nil && !s.TLS {
+		return fmt.Errorf("%w: TLSConfig set without TLS", ErrInvalid)
+	}
+	if s.ProtocolVersion == 0 {
+		s.ProtocolVersion = MQTT311
+	}
+	switch s.ProtocolVersion {
 	case MQTT31, MQTT311, MQTT5:
 	default:
-		return fmt.Errorf("%w: protocol version %d", ErrInvalid, o.ProtocolVersion)
+		return fmt.Errorf("%w: protocol version %d", ErrInvalid, s.ProtocolVersion)
 	}
-	if o.ClientID == "" && !o.CleanStart {
+	if s.ClientID == "" && !s.CleanStart {
 		return fmt.Errorf("%w: an empty client id requires CleanStart", ErrInvalid)
 	}
-	if err := checkUTF8String(o.ClientID); err != nil {
+	if err := checkUTF8String(s.ClientID); err != nil {
 		return fmt.Errorf("%w: client id: %v", ErrInvalid, err)
 	}
-	if o.ClientID == "" && o.ProtocolVersion == MQTT31 {
-		o.ClientID = randomClientID()
+	if s.ClientID == "" && s.ProtocolVersion == MQTT31 {
+		s.ClientID = randomClientID()
 	}
-	if o.KeepAlive != 0 && o.KeepAlive < 5 {
+	if s.KeepAlive != 0 && s.KeepAlive < 5 {
 		return fmt.Errorf("%w: keepalive must be 0 or at least 5 seconds", ErrInvalid)
 	}
-	if err := checkCredentials(o.ProtocolVersion, o.Username, o.Password); err != nil {
+	if err := checkCredentials(s.ProtocolVersion, s.Username, s.Password); err != nil {
 		return err
 	}
-	if err := checkWill(o.ProtocolVersion, o.NoTopicCheck, o.Will); err != nil {
+	if err := checkWill(s.ProtocolVersion, noTopicCheck, s.Will); err != nil {
 		return err
 	}
-	if o.ConnectProperties != nil && o.ProtocolVersion != MQTT5 {
+	if s.ConnectProperties != nil && s.ProtocolVersion != MQTT5 {
 		return fmt.Errorf("%w: CONNECT properties require MQTT 5", ErrNotSupported)
 	}
-	if o.ReceiveMaximum == 0 {
-		o.ReceiveMaximum = DefaultReceiveMaximum
+	if s.ReceiveMaximum == 0 {
+		s.ReceiveMaximum = DefaultReceiveMaximum
 	}
-	if o.MaxInflight == 0 {
-		o.MaxInflight = DefaultMaxInflight
+	if s.MaxInflight == 0 {
+		s.MaxInflight = DefaultMaxInflight
 	}
-	return o.validateRun()
+	return s.validateRun()
 }
 
 // validateRun checks and defaults the options used by Run.
-func (o *Options) validateRun() error {
-	if o.ReconnectDelay < 0 || o.ReconnectDelayMax < 0 || o.ConnectTimeout < 0 {
+func (s *Server) validateRun() error {
+	if s.ReconnectDelay < 0 || s.ReconnectDelayMax < 0 || s.ConnectTimeout < 0 {
 		return fmt.Errorf("%w: negative reconnect delay or connect timeout", ErrInvalid)
 	}
-	if o.ReconnectDelay == 0 {
-		o.ReconnectDelay = time.Second
+	if s.ReconnectDelay == 0 {
+		s.ReconnectDelay = time.Second
 	}
-	if o.ReconnectDelayMax == 0 {
-		o.ReconnectDelayMax = o.ReconnectDelay
+	if s.ReconnectDelayMax == 0 {
+		s.ReconnectDelayMax = s.ReconnectDelay
 	}
-	if o.ConnectTimeout == 0 {
-		o.ConnectTimeout = 30 * time.Second
+	if s.ConnectTimeout == 0 {
+		s.ConnectTimeout = 30 * time.Second
 	}
 	return nil
 }

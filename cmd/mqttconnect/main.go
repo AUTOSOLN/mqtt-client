@@ -1,7 +1,7 @@
 // Command mqttconnect is a manual test tool for this client. It runs a
 // chosen combination of steps against a real broker:
 //
-//	tcp         open a TCP connection (and TLS handshake for mqtts://), then close it
+//	tcp         open a TCP connection (and TLS handshake with -tls), then close it
 //	connect     open a connection, send CONNECT and wait for CONNACK
 //	disconnect  send DISCONNECT and wait for the connection to close
 //
@@ -10,12 +10,18 @@
 // connection, so the broker sees it drop without DISCONNECT and publishes
 // any Will.
 //
+// With -config, the connect step runs the client's supervisor
+// (Client.Run) with the servers in the file: it fails over until one
+// accepts the connection, and while held it reconnects, failing over
+// again, until -hold ends.
+//
 // Examples:
 //
-//	mqttconnect -server mqtt://localhost:1883 -steps tcp
-//	mqttconnect -server mqtt://localhost:1883 -v 5 -id test1 -hold 30s -debug
-//	mqttconnect -server mqtts://broker:8883 -cafile ca.pem -u user -P secret
+//	mqttconnect -address localhost:1883 -steps tcp
+//	mqttconnect -address localhost:1883 -v 5 -id test1 -hold 30s -debug
+//	mqttconnect -address broker:8883 -tls -cafile ca.pem -u user -P secret
 //	mqttconnect -steps connect -hold 5s -will-topic t/will -will-payload bye
+//	mqttconnect -config brokers.yaml -hold 5m
 package main
 
 import (
@@ -25,7 +31,6 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -57,6 +62,9 @@ func run() int {
 	flag.Parse()
 
 	doTCP, doConnect, doDisconnect, err := parseSteps(cfg.steps)
+	if err == nil && doTCP && cfg.conn.Config != "" {
+		err = errors.New(`"tcp" takes -address, not -config`)
+	}
 	if err == nil {
 		_, err = cfg.conn.Options() // check the connection flags before any step
 	}
@@ -118,22 +126,11 @@ func parseSteps(s string) (tcp, connect, disconnect bool, err error) {
 // tcpOnly dials the server without speaking MQTT. The client package does
 // not expose a dial-only step, so this uses net and crypto/tls directly.
 func tcpOnly(ctx context.Context, f *cli.ConnFlags) error {
-	u, err := url.Parse(f.Server)
+	addr := f.Address
+	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return err
+		return fmt.Errorf("address %q: %w", addr, err)
 	}
-	useTLS, port := false, "1883"
-	switch strings.ToLower(u.Scheme) {
-	case "mqtt", "tcp":
-	case "mqtts", "ssl", "tls":
-		useTLS, port = true, "8883"
-	default:
-		return fmt.Errorf("unsupported scheme %q", u.Scheme)
-	}
-	if p := u.Port(); p != "" {
-		port = p
-	}
-	addr := net.JoinHostPort(u.Hostname(), port)
 
 	ctx, cancel := context.WithTimeout(ctx, f.Timeout)
 	defer cancel()
@@ -145,7 +142,7 @@ func tcpOnly(ctx context.Context, f *cli.ConnFlags) error {
 	}
 	defer nc.Close()
 	cli.Logf("tcp connected %s -> %s in %v", nc.LocalAddr(), nc.RemoteAddr(), cli.Since(start))
-	if !useTLS {
+	if !f.TLS {
 		return nil
 	}
 
@@ -157,7 +154,7 @@ func tcpOnly(ctx context.Context, f *cli.ConnFlags) error {
 		tc = &tls.Config{}
 	}
 	if tc.ServerName == "" {
-		tc.ServerName = u.Hostname()
+		tc.ServerName = host
 	}
 	tconn := tls.Client(nc, tc)
 	if err := tconn.HandshakeContext(ctx); err != nil {
@@ -180,7 +177,7 @@ func connect(ctx context.Context, cfg *config, disconnect bool) error {
 	if cfg.reason != 0 && s.Version != mqttclient.MQTT5 {
 		return errors.New("-reason requires -v 5")
 	}
-	if _, err := s.Connect(ctx); err != nil {
+	if err := s.Start(ctx); err != nil {
 		return err
 	}
 	if err := s.Hold(ctx, cfg.hold); err != nil {

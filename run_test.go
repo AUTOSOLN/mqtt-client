@@ -27,7 +27,7 @@ func runResult(t *testing.T, ch <-chan error) error {
 }
 
 // fast reconnects quickly so the tests run in milliseconds.
-func fast(opts Options) Options {
+func fast(opts Server) Server {
 	opts.ReconnectDelay = 20 * time.Millisecond
 	opts.ConnectTimeout = 2 * time.Second
 	return opts
@@ -45,7 +45,7 @@ func accepted(t *testing.T, b *fakeBroker, version byte) *fakeConn {
 // Run reconnects after a lost connection and resends what was in flight.
 func TestRunReconnects(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newPubClient(t, b, fast(Options{}))
+	c, rec := newPubClient(t, b, fast(Server{}))
 	res := runAsync(c, context.Background())
 
 	fc := accepted(t, b, 4)
@@ -91,7 +91,7 @@ func TestRunServerDownAtStart(t *testing.T) {
 
 	failures := make(chan error, 100)
 	connects := make(chan ConnAck, 1)
-	c, err := New(fast(Options{Server: "mqtt://" + addr, ClientID: "c", CleanStart: true}), Handlers{
+	c, err := New(single(fast(Server{Address: addr, ClientID: "c", CleanStart: true})), Handlers{
 		OnConnectError: func(_ *Client, err error) { failures <- err },
 		OnConnect:      func(_ *Client, a ConnAck) { connects <- a },
 	})
@@ -156,7 +156,7 @@ func TestRunStopsOnPermanentErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newFakeBroker(t)
-			c, _ := newPubClient(t, b, fast(Options{ProtocolVersion: tc.version}))
+			c, _ := newPubClient(t, b, fast(Server{ProtocolVersion: tc.version}))
 			res := runAsync(c, context.Background())
 			fc := b.accept()
 			fc.readConnect()
@@ -171,7 +171,7 @@ func TestRunStopsOnPermanentErrors(t *testing.T) {
 // Transient refusals and missing CONNACKs are retried.
 func TestRunRetries(t *testing.T) {
 	b := newFakeBroker(t)
-	opts := fast(Options{ProtocolVersion: MQTT5})
+	opts := fast(Server{ProtocolVersion: MQTT5})
 	opts.ConnectTimeout = 200 * time.Millisecond
 	c, rec := newPubClient(t, b, opts)
 	res := runAsync(c, context.Background())
@@ -200,7 +200,7 @@ func TestRunRetries(t *testing.T) {
 // Disconnect stops Run while it waits to reconnect.
 func TestRunDisconnectWhileWaiting(t *testing.T) {
 	b := newFakeBroker(t)
-	opts := fast(Options{})
+	opts := fast(Server{})
 	opts.ReconnectDelay = time.Hour
 	c, rec := newPubClient(t, b, opts)
 	res := runAsync(c, context.Background())
@@ -226,7 +226,7 @@ func TestRunDisconnectWhileWaiting(t *testing.T) {
 // (mosquitto_reconnect). Connect starts from "available" again.
 func TestRunKeepsRetainAvailable(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newPubClient(t, b, fast(Options{ProtocolVersion: MQTT5,
+	c, rec := newPubClient(t, b, fast(Server{ProtocolVersion: MQTT5,
 		Will: &Message{Topic: "w", Payload: []byte("x"), Retain: true}}))
 	res := runAsync(c, context.Background())
 
@@ -262,18 +262,18 @@ func TestReconnectDelay(t *testing.T) {
 	s := time.Second
 	cases := []struct {
 		name string
-		opts Options
+		opts Server
 		want []time.Duration
 	}{
-		{"default fixed", Options{}, []time.Duration{s, s, s, s}},
-		{"linear", Options{ReconnectDelay: s, ReconnectDelayMax: 3 * s}, []time.Duration{s, 2 * s, 3 * s, 3 * s, 3 * s}},
-		{"exponential", Options{ReconnectDelay: s, ReconnectDelayMax: 10 * s, ReconnectExponential: true},
+		{"default fixed", Server{}, []time.Duration{s, s, s, s}},
+		{"linear", Server{ReconnectDelay: s, ReconnectDelayMax: 3 * s}, []time.Duration{s, 2 * s, 3 * s, 3 * s, 3 * s}},
+		{"exponential", Server{ReconnectDelay: s, ReconnectDelayMax: 10 * s, ReconnectExponential: true},
 			[]time.Duration{s, 4 * s, 9 * s, 10 * s, 10 * s}},
 	}
 	for _, tc := range cases {
 		opts := tc.opts
-		opts.Server, opts.CleanStart = "mqtt://h", true
-		c, err := New(opts, Handlers{})
+		opts.Address, opts.CleanStart = "h:1883", true
+		c, err := New(single(opts), Handlers{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -281,7 +281,7 @@ func TestReconnectDelay(t *testing.T) {
 		n := 0
 		for range tc.want {
 			var d time.Duration
-			d, n = c.reconnectDelay(n)
+			d, n = c.srvs[0].reconnectDelay(n)
 			got = append(got, d)
 		}
 		if !slices.Equal(got, tc.want) {
@@ -294,7 +294,7 @@ func TestReconnectDelay(t *testing.T) {
 // stops Run without an error.
 func TestRunDisconnectDuringAttempt(t *testing.T) {
 	b := newFakeBroker(t)
-	c, _ := newPubClient(t, b, fast(Options{}))
+	c, _ := newPubClient(t, b, fast(Server{}))
 	res := runAsync(c, context.Background())
 	fc := b.accept()
 	fc.readConnect()

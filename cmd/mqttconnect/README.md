@@ -4,7 +4,7 @@ A manual test tool for `mqttclient`. It runs a chosen combination of steps again
 
 | Step | What it does |
 |---|---|
-| `tcp` | Opens a TCP connection, plus a TLS handshake for `mqtts://`, then closes it. This step uses Go's standard `net` and `crypto/tls` packages directly, not the client, because the client has no dial-only call. |
+| `tcp` | Opens a TCP connection, plus a TLS handshake with `-tls`, then closes it. This step uses Go's standard `net` and `crypto/tls` packages directly, not the client, because the client has no dial-only call. |
 | `connect` | Dials, sends CONNECT and waits for CONNACK (`Client.Connect`). |
 | `disconnect` | Sends DISCONNECT and waits for the connection to close (`Client.Disconnect`). |
 
@@ -28,7 +28,9 @@ go build -o build/mqttconnect ./cmd/mqttconnect
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `-server` | `mqtt://localhost:1883` | Broker URL: `mqtt://` or `tcp://` (default port 1883), `mqtts://`, `ssl://` or `tls://` (default port 8883) |
+| `-address` | `localhost:1883` | Broker address as `host:port` (IP address or hostname; the port is required) |
+| `-config` | empty | YAML file of one or more servers to use instead of `-address`; see [Several brokers](../mqttpub/README.md#several-brokers--config). Not with `-steps tcp`. |
+| `-tls` | `false` | Connect with TLS. Never inferred from the port |
 | `-steps` | `connect,disconnect` | `tcp`, `connect` or `connect,disconnect` |
 | `-v` | `311` | Protocol version: `31`, `311` or `5` |
 | `-id` | empty | Client id. An empty id needs `-clean`. MQTT 3.1 then gets a random `mosq-…` id; MQTT 5 uses the id the broker assigns. |
@@ -44,7 +46,7 @@ go build -o build/mqttconnect ./cmd/mqttconnect
 | `-cafile` | empty | PEM file of CA certificates to trust |
 | `-cert`, `-key` | empty | Client certificate and private key (PEM) |
 | `-insecure` | `false` | Skip server certificate verification |
-| `-servername` | URL host | TLS server name |
+| `-servername` | `-address` host | TLS server name |
 | `-will-topic` | empty | Sets a Will on this topic |
 | `-will-payload`, `-will-qos`, `-will-retain` | empty, 0, false | The rest of the Will |
 
@@ -59,7 +61,7 @@ repository root.
 
 ```sh
 build/mqttconnect -steps tcp
-build/mqttconnect -steps tcp -server mqtts://broker.example:8883 -cafile ca.pem   # also prints the TLS version and server cert
+build/mqttconnect -steps tcp -address broker.example:8883 -tls -cafile ca.pem   # also prints the TLS version and server cert
 ```
 
 ### Connect and disconnect for each protocol version
@@ -110,10 +112,10 @@ build/mqttconnect -will-topic t/will/c -will-payload clean                      
 ### TLS
 
 ```sh
-build/mqttconnect -server mqtts://broker.example:8883 -cafile ca.pem
-build/mqttconnect -server mqtts://localhost:8883 -cafile ca.pem -servername broker.example
-build/mqttconnect -server mqtts://localhost:8883 -cert client.pem -key client.key -cafile ca.pem   # mutual TLS
-build/mqttconnect -server mqtts://localhost:8883 -insecure                                         # self-signed, no verification
+build/mqttconnect -address broker.example:8883 -tls -cafile ca.pem
+build/mqttconnect -address localhost:8883 -tls -cafile ca.pem -servername broker.example
+build/mqttconnect -address localhost:8883 -tls -cert client.pem -key client.key -cafile ca.pem   # mutual TLS
+build/mqttconnect -address localhost:8883 -tls -insecure                                         # self-signed, no verification
 ```
 
 To test against a local broker, add a TLS listener to `mosquitto.conf`:
@@ -132,11 +134,24 @@ keyfile  /path/server.key
 build/mqttconnect -repeat 100 -id loop
 ```
 
+### Several brokers and failover
+
+With `-config`, the connect step runs `Client.Run`: it fails over between the servers until one
+accepts, and while it holds the connection it reconnects whenever the connection is lost. The
+file format is described in the [mqttpub README](../mqttpub/README.md#several-brokers--config).
+
+```sh
+build/mqttconnect -config cmd/brokers.example.yaml -hold 5m
+```
+
+Stop the broker it connected to. The log shows `OnDisconnect`, then `connecting to server …` and
+`OnConnectError` lines as it tries the servers in turn, and `OnConnect` once one accepts.
+
 ### Failure cases
 
 ```sh
-build/mqttconnect -server mqtt://localhost:1999 -timeout 2s               # connection refused
-build/mqttconnect -server mqtts://localhost:1883 -steps tcp -insecure     # TLS against a plain port
+build/mqttconnect -address localhost:1999 -timeout 2s               # connection refused
+build/mqttconnect -address localhost:1883 -tls -steps tcp -insecure     # TLS against a plain port
 ```
 
 ## Reading the output

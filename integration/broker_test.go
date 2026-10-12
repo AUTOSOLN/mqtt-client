@@ -65,7 +65,7 @@ func newBroker(t *testing.T, persistence bool) *broker {
 	return b
 }
 
-func (b *broker) url() string { return "mqtt://" + b.addr }
+func (b *broker) address() string { return b.addr }
 
 // start runs the broker and waits until it accepts connections.
 func (b *broker) start() {

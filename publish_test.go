@@ -20,9 +20,9 @@ type publishEvent struct {
 	reason byte
 }
 
-func newPubClient(t *testing.T, b *fakeBroker, opts Options) (*Client, *pubRecorder) {
+func newPubClient(t *testing.T, b *fakeBroker, opts Server) (*Client, *pubRecorder) {
 	t.Helper()
-	opts.Server = b.url()
+	opts.Address = b.address()
 	if opts.ClientID == "" {
 		opts.ClientID = "c"
 	}
@@ -32,7 +32,7 @@ func newPubClient(t *testing.T, b *fakeBroker, opts Options) (*Client, *pubRecor
 		messages:  make(chan *Message, 10),
 		published: make(chan publishEvent, 10),
 	}
-	c, err := New(opts, Handlers{
+	c, err := New(single(opts), Handlers{
 		OnConnect:    func(_ *Client, a ConnAck) { rec.connects <- a },
 		OnDisconnect: func(_ *Client, e DisconnectEvent) { rec.disconnects <- e },
 		OnMessage:    func(_ *Client, m *Message) { rec.messages <- m },
@@ -108,7 +108,7 @@ func msg(qos byte) *Message { return &Message{Topic: "t", Payload: []byte("hi"),
 
 func TestPublishQoS0(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newPubClient(t, b, Options{})
+	c, rec := newPubClient(t, b, Server{})
 	fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 
 	p := publishOK(t, c, &Message{Topic: "t", Payload: []byte("hi"), Retain: true})
@@ -127,7 +127,7 @@ func TestPublishQoS0(t *testing.T) {
 
 func TestPublishQoS1(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newPubClient(t, b, Options{})
+	c, rec := newPubClient(t, b, Server{})
 	fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 
 	p := publishOK(t, c, msg(1))
@@ -148,7 +148,7 @@ func TestPublishQoS1(t *testing.T) {
 
 func TestPublishQoS2(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newPubClient(t, b, Options{})
+	c, rec := newPubClient(t, b, Server{})
 	fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 
 	p := publishOK(t, c, msg(2))
@@ -166,7 +166,7 @@ func TestPublishQoS2(t *testing.T) {
 
 func TestPublishV5Properties(t *testing.T) {
 	b := newFakeBroker(t)
-	c, _ := newPubClient(t, b, Options{ProtocolVersion: MQTT5})
+	c, _ := newPubClient(t, b, Server{ProtocolVersion: MQTT5})
 	fc := handshake(t, b, c, connackBytes(t, 5, 0, false, nil))
 
 	// Response Topic is only encoded by comqtt with AllowResponseInfo, and
@@ -178,7 +178,7 @@ func TestPublishV5Properties(t *testing.T) {
 // PUBREC with a failure reason code ends a QoS 2 flow (MQTT 5).
 func TestPubrecFailure(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newPubClient(t, b, Options{ProtocolVersion: MQTT5})
+	c, rec := newPubClient(t, b, Server{ProtocolVersion: MQTT5})
 	fc := handshake(t, b, c, connackBytes(t, 5, 0, false, &Properties{ReceiveMaximum: 1}))
 
 	p1 := publishOK(t, c, msg(2))
@@ -208,12 +208,12 @@ func TestSendQuota(t *testing.T) {
 	cases := []struct {
 		name    string
 		version byte
-		opts    Options
+		opts    Server
 		props   *Properties
 		quota   int
 	}{
-		{"v5 server receive maximum", 5, Options{ProtocolVersion: MQTT5}, &Properties{ReceiveMaximum: 2}, 2},
-		{"v311 max inflight", 4, Options{MaxInflight: 3}, nil, 3},
+		{"v5 server receive maximum", 5, Server{ProtocolVersion: MQTT5}, &Properties{ReceiveMaximum: 2}, 2},
+		{"v311 max inflight", 4, Server{MaxInflight: 3}, nil, 3},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -239,7 +239,7 @@ func TestSendQuota(t *testing.T) {
 
 func TestPublishChecks(t *testing.T) {
 	b := newFakeBroker(t)
-	c, _ := newPubClient(t, b, Options{ProtocolVersion: MQTT5})
+	c, _ := newPubClient(t, b, Server{ProtocolVersion: MQTT5})
 	fc := handshake(t, b, c, connackBytes(t, 5, 0, false, &Properties{
 		MaximumQos: 1, MaximumQosFlag: true, RetainAvailable: 0, RetainAvailableFlag: true, MaximumPacketSize: 20}))
 
@@ -273,7 +273,7 @@ func TestPublishChecks(t *testing.T) {
 }
 
 func TestPublishV311Properties(t *testing.T) {
-	c, err := New(Options{Server: "mqtt://h", CleanStart: true}, Handlers{})
+	c, err := New(single(Server{Address: "h:1883", CleanStart: true}), Handlers{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +286,7 @@ func TestPublishV311Properties(t *testing.T) {
 // CONNACK, as with mosquitto_publish.
 func TestPublishWhileDisconnected(t *testing.T) {
 	b := newFakeBroker(t)
-	c, _ := newPubClient(t, b, Options{})
+	c, _ := newPubClient(t, b, Server{})
 	if _, err := c.Publish(context.Background(), msg(0)); !errors.Is(err, ErrNoConn) {
 		t.Fatalf("QoS 0 err %v", err)
 	}
@@ -303,7 +303,7 @@ func TestPublishWhileDisconnected(t *testing.T) {
 // DUP set, or PUBREL once PUBREC has arrived (message__reconnect_reset).
 func TestResendAfterReconnect(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newPubClient(t, b, Options{})
+	c, rec := newPubClient(t, b, Server{})
 	fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 	p1 := publishOK(t, c, msg(1))
 	p2 := publishOK(t, c, msg(2))
@@ -328,7 +328,7 @@ func TestResendAfterReconnect(t *testing.T) {
 
 func TestReceiveQoS0And1(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newPubClient(t, b, Options{})
+	c, rec := newPubClient(t, b, Server{})
 	fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 
 	fc.send(0x31, 0x05, 0x00, 0x01, 'a', 'h', 'i')
@@ -346,7 +346,7 @@ func TestReceiveQoS0And1(t *testing.T) {
 // message replaces it, so it is delivered once.
 func TestReceiveQoS2(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newPubClient(t, b, Options{})
+	c, rec := newPubClient(t, b, Server{})
 	fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 
 	fc.send(0x34, 0x07, 0x00, 0x01, 'a', 0x00, 0x07, 'h', 'i')
@@ -369,7 +369,7 @@ func TestReceiveQoS2(t *testing.T) {
 
 func TestReceiveV5Properties(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newPubClient(t, b, Options{ProtocolVersion: MQTT5})
+	c, rec := newPubClient(t, b, Server{ProtocolVersion: MQTT5})
 	fc := handshake(t, b, c, connackBytes(t, 5, 0, false, nil))
 	fc.send(0x30, 0x0A, 0x00, 0x01, 'a', 0x05, 0x03, 0x00, 0x02, 'c', 't', 'x')
 	m := rec.message(t)
@@ -384,7 +384,7 @@ func TestReceiveV5Properties(t *testing.T) {
 func TestUnexpectedAcks(t *testing.T) {
 	t.Run("unknown puback and pubcomp", func(t *testing.T) {
 		b := newFakeBroker(t)
-		c, rec := newPubClient(t, b, Options{})
+		c, rec := newPubClient(t, b, Server{})
 		fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 		fc.send(0x40, 0x02, 0x00, 0x09)
 		fc.send(0x70, 0x02, 0x00, 0x09)
@@ -398,7 +398,7 @@ func TestUnexpectedAcks(t *testing.T) {
 	})
 	t.Run("unknown pubrec gets pubrel", func(t *testing.T) {
 		b := newFakeBroker(t)
-		c, _ := newPubClient(t, b, Options{})
+		c, _ := newPubClient(t, b, Server{})
 		fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 		fc.send(0x50, 0x02, 0x00, 0x09)
 		fc.expect(0x62, 0x02, 0x00, 0x09)
@@ -416,7 +416,7 @@ func TestUnexpectedAcks(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newFakeBroker(t)
-			c, rec := newPubClient(t, b, Options{ProtocolVersion: MQTT5})
+			c, rec := newPubClient(t, b, Server{ProtocolVersion: MQTT5})
 			fc := handshake(t, b, c, connackBytes(t, 5, 0, false, nil))
 			publishOK(t, c, msg(tc.qos))
 			fc.readRaw()
@@ -433,24 +433,24 @@ func TestInboundProtocolErrors(t *testing.T) {
 	cases := []struct {
 		name    string
 		version byte
-		opts    Options
+		opts    Server
 		send    [][]byte
 		want    []byte
 	}{
-		{"receive maximum exceeded", 5, Options{ProtocolVersion: MQTT5, ReceiveMaximum: 1}, [][]byte{
+		{"receive maximum exceeded", 5, Server{ProtocolVersion: MQTT5, ReceiveMaximum: 1}, [][]byte{
 			{0x34, 0x06, 0x00, 0x01, 'a', 0x00, 0x01, 0x00},
 			{0x34, 0x06, 0x00, 0x01, 'a', 0x00, 0x02, 0x00},
 		}, []byte{0xE0, 0x01, 0x93}},
-		{"topic alias", 5, Options{ProtocolVersion: MQTT5}, [][]byte{
+		{"topic alias", 5, Server{ProtocolVersion: MQTT5}, [][]byte{
 			{0x30, 0x07, 0x00, 0x01, 'a', 0x03, 0x23, 0x00, 0x01},
 		}, []byte{0xE0, 0x01, 0x94}},
-		{"wildcard topic", 5, Options{ProtocolVersion: MQTT5}, [][]byte{
+		{"wildcard topic", 5, Server{ProtocolVersion: MQTT5}, [][]byte{
 			{0x30, 0x04, 0x00, 0x01, '#', 0x00},
 		}, []byte{0xE0, 0x01, 0x81}},
-		{"mid 0", 5, Options{ProtocolVersion: MQTT5}, [][]byte{
+		{"mid 0", 5, Server{ProtocolVersion: MQTT5}, [][]byte{
 			{0x32, 0x06, 0x00, 0x01, 'a', 0x00, 0x00, 0x00},
 		}, []byte{0xE0, 0x01, 0x82}},
-		{"oversize for client maximum", 5, Options{ProtocolVersion: MQTT5, ConnectProperties: &Properties{MaximumPacketSize: 8}}, [][]byte{
+		{"oversize for client maximum", 5, Server{ProtocolVersion: MQTT5, ConnectProperties: &Properties{MaximumPacketSize: 8}}, [][]byte{
 			{0x30, 0x07, 0x00, 0x01, 'a', 0x00, 'x', 'y', 'z'},
 		}, []byte{0xE0, 0x01, 0x95}},
 	}
@@ -477,7 +477,7 @@ func TestInboundProtocolErrors(t *testing.T) {
 // their PUBREL will never come, and they must not use up Receive Maximum.
 func TestInboundQoS2ClearedWithoutSession(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newPubClient(t, b, Options{ProtocolVersion: MQTT5, ReceiveMaximum: 1})
+	c, rec := newPubClient(t, b, Server{ProtocolVersion: MQTT5, ReceiveMaximum: 1})
 	fc := handshake(t, b, c, connackBytes(t, 5, 0, false, nil))
 	fc.send(0x34, 0x06, 0x00, 0x01, 'a', 0x00, 0x01, 0x00)
 	fc.readRaw()
@@ -513,7 +513,7 @@ func TestMidAllocation(t *testing.T) {
 // publishes cannot overtake the acknowledgement (11-prop-recv-qos1).
 func TestAckBeforeDelivery(t *testing.T) {
 	b := newFakeBroker(t)
-	c, err := New(Options{Server: b.url(), ClientID: "c", CleanStart: true}, Handlers{
+	c, err := New(single(Server{Address: b.address(), ClientID: "c", CleanStart: true}), Handlers{
 		OnMessage: func(c *Client, _ *Message) { _, _ = c.Publish(context.Background(), &Message{Topic: "ok"}) },
 	})
 	if err != nil {

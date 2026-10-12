@@ -37,7 +37,7 @@ func expectGranted(granted []byte, qos byte) {
 // subscribeThenDisconnect subscribes on connect and disconnects on SUBACK
 // (02-subscribe-qos*).
 func subscribeThenDisconnect(port int, id, topic string, qos byte) int {
-	return client(port, mqttclient.Options{ClientID: id}, mqttclient.Handlers{
+	return client(port, mqttclient.Server{ClientID: id}, mqttclient.Handlers{
 		OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) { subscribe(c, topic, qos) },
 		OnSubscribe: func(c *mqttclient.Client, _ uint16, granted []byte, _ *mqttclient.Properties) {
 			expectGranted(granted, qos)
@@ -49,7 +49,7 @@ func subscribeThenDisconnect(port int, id, topic string, qos byte) int {
 // subscribeHelper is mosquitto_subscribe_simple / mosquitto_subscribe_callback
 // for one message: subscribe, and disconnect once a message arrives.
 func subscribeHelper(port int) int {
-	return client(port, mqttclient.Options{ClientID: "subscribe-qos2-test"}, mqttclient.Handlers{
+	return client(port, mqttclient.Server{ClientID: "subscribe-qos2-test"}, mqttclient.Handlers{
 		OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) { subscribe(c, "qos2/test", 2) },
 		OnMessage: func(c *mqttclient.Client, m *mqttclient.Message) {
 			if m.Topic != "qos2/test" {
@@ -64,7 +64,7 @@ func subscribeHelper(port int) int {
 // and finishes when the response arrives (03-request-response-1 and
 // 03-request-response-correlation-1).
 func requester(port int, props *mqttclient.Properties) int {
-	return client(port, mqttclient.Options{ClientID: "request-test", ProtocolVersion: v5}, mqttclient.Handlers{
+	return client(port, mqttclient.Server{ClientID: "request-test", ProtocolVersion: v5}, mqttclient.Handlers{
 		OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) { subscribe(c, "response/topic", 0) },
 		OnSubscribe: func(c *mqttclient.Client, _ uint16, granted []byte, _ *mqttclient.Properties) {
 			expectGranted(granted, 0)
@@ -97,7 +97,7 @@ func init() {
 		"02-subscribe-helper-callback-qos2": subscribeHelper,
 
 		"02-unsubscribe": func(port int) int {
-			return client(port, mqttclient.Options{ClientID: "unsubscribe-test"}, mqttclient.Handlers{
+			return client(port, mqttclient.Server{ClientID: "unsubscribe-test"}, mqttclient.Handlers{
 				OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) {
 					unsubscribe(c, []string{"unsubscribe/test"}, nil)
 				},
@@ -105,7 +105,7 @@ func init() {
 			})
 		},
 		"02-unsubscribe-v5": func(port int) int {
-			return client(port, mqttclient.Options{ClientID: "unsubscribe-test", ProtocolVersion: v5}, mqttclient.Handlers{
+			return client(port, mqttclient.Server{ClientID: "unsubscribe-test", ProtocolVersion: v5}, mqttclient.Handlers{
 				OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) {
 					unsubscribe(c, []string{"unsubscribe/test"}, &mqttclient.Properties{User: []mqttclient.UserProperty{{Key: "key", Val: "value"}}})
 				},
@@ -113,7 +113,7 @@ func init() {
 			})
 		},
 		"02-unsubscribe-multiple-v5": func(port int) int {
-			return client(port, mqttclient.Options{ClientID: "unsubscribe-test", ProtocolVersion: v5}, mqttclient.Handlers{
+			return client(port, mqttclient.Server{ClientID: "unsubscribe-test", ProtocolVersion: v5}, mqttclient.Handlers{
 				OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) { subscribe(c, "unsubscribe/test", 2) },
 				OnSubscribe: func(c *mqttclient.Client, _ uint16, granted []byte, _ *mqttclient.Properties) {
 					expectGranted(granted, 2)
@@ -137,7 +137,7 @@ func init() {
 			return requester(port, &mqttclient.Properties{ResponseTopic: "response/topic", CorrelationData: []byte("corridor")})
 		},
 		"03-request-response-2": func(port int) int {
-			return client(port, mqttclient.Options{ClientID: "response-test", ProtocolVersion: v5}, mqttclient.Handlers{
+			return client(port, mqttclient.Server{ClientID: "response-test", ProtocolVersion: v5}, mqttclient.Handlers{
 				OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) { subscribe(c, "request/topic", 0) },
 				OnMessage: func(c *mqttclient.Client, m *mqttclient.Message) {
 					p := m.Properties
@@ -180,7 +180,7 @@ func init() {
 // publishLoop subscribes, publishes to its own subscription, and disconnects
 // when the message comes back.
 func publishLoop(start starter, port int) int {
-	return start(port, mqttclient.Options{ClientID: "loop-test", ProtocolVersion: v5}, mqttclient.Handlers{
+	return start(port, mqttclient.Server{ClientID: "loop-test", ProtocolVersion: v5}, mqttclient.Handlers{
 		OnConnect: func(c *mqttclient.Client, _ mqttclient.ConnAck) { subscribe(c, "loop/test", 0) },
 		OnSubscribe: func(c *mqttclient.Client, _ uint16, _ []byte, _ *mqttclient.Properties) {
 			if _, err := publish(c, "loop/test", "message", 0, nil); err != nil {

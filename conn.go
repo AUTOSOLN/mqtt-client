@@ -18,6 +18,7 @@ import (
 // sends PINGREQ and detects a silent server. Writes are serialised by wmu.
 type conn struct {
 	c       *Client
+	srv     *serverState // the server this connection is to
 	version byte
 	nc      net.Conn
 	br      *bufio.Reader
@@ -56,10 +57,11 @@ type connackResult struct {
 	err error
 }
 
-func newConn(c *Client) *conn {
+func newConn(c *Client, srv *serverState) *conn {
 	return &conn{
 		c:        c,
-		version:  c.opts.ProtocolVersion,
+		srv:      srv,
+		version:  srv.ProtocolVersion,
 		kick:     make(chan struct{}, 1),
 		kaDone:   make(chan struct{}),
 		connack:  make(chan connackResult, 1),
@@ -73,7 +75,7 @@ func newConn(c *Client) *conn {
 func (cn *conn) start(nc net.Conn) {
 	cn.nc = nc
 	cn.br = bufio.NewReader(nc)
-	ka := time.Duration(cn.c.opts.KeepAlive) * time.Second
+	ka := time.Duration(cn.srv.KeepAlive) * time.Second
 	now := time.Now().UnixNano()
 	cn.keepalive.Store(int64(ka))
 	cn.lastIn.Store(now)
@@ -284,7 +286,7 @@ func (cn *conn) handleConnack(pk *packets.Packet) error {
 		}
 		return cn.connackRefused(ConnAck{ReasonCode: code})
 	}
-	if c.opts.CleanStart && pk.SessionPresent {
+	if cn.srv.CleanStart && pk.SessionPresent {
 		return fmt.Errorf("%w: CONNACK with session present when clean start was set", ErrProtocol)
 	}
 
@@ -294,14 +296,14 @@ func (cn *conn) handleConnack(pk *packets.Packet) error {
 		ack.Properties = &props
 		c.mu.Lock()
 		if props.AssignedClientID != "" {
-			if c.clientID != "" {
+			if cn.srv.clientID != "" {
 				c.mu.Unlock()
 				return fmt.Errorf("%w: server assigned a client id but we already have one", ErrProtocol)
 			}
-			c.clientID = props.AssignedClientID
+			cn.srv.clientID = props.AssignedClientID
 		}
 		if props.RetainAvailableFlag {
-			c.retainAvailable = props.RetainAvailable != 0
+			cn.srv.retainAvailable = props.RetainAvailable != 0
 		}
 		c.mu.Unlock()
 		if props.ServerKeepAliveFlag {
@@ -336,7 +338,7 @@ func (cn *conn) sendMaximum(props *Properties) uint16 {
 	if props != nil && props.ReceiveMaximum > 0 {
 		return props.ReceiveMaximum
 	}
-	return cn.c.opts.MaxInflight
+	return cn.srv.MaxInflight
 }
 
 func (cn *conn) connackRefused(ack ConnAck) error {

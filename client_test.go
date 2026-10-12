@@ -14,11 +14,11 @@ type recorder struct {
 	disconnects chan DisconnectEvent
 }
 
-func newTestClient(t *testing.T, b *fakeBroker, opts Options) (*Client, *recorder) {
+func newTestClient(t *testing.T, b *fakeBroker, opts Server) (*Client, *recorder) {
 	t.Helper()
-	opts.Server = b.url()
+	opts.Address = b.address()
 	rec := &recorder{connects: make(chan ConnAck, 10), disconnects: make(chan DisconnectEvent, 10)}
-	c, err := New(opts, Handlers{
+	c, err := New(single(opts), Handlers{
 		OnConnect:    func(_ *Client, a ConnAck) { rec.connects <- a },
 		OnDisconnect: func(_ *Client, e DisconnectEvent) { rec.disconnects <- e },
 	})
@@ -75,7 +75,7 @@ func (r *recorder) connect(t *testing.T) ConnAck {
 
 func TestConnectDisconnectV311(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newTestClient(t, b, Options{ClientID: "c1", CleanStart: true, KeepAlive: 60,
+	c, rec := newTestClient(t, b, Server{ClientID: "c1", CleanStart: true, KeepAlive: 60,
 		Username: "user", Password: []byte("pw"),
 		Will: &Message{Topic: "will/t", Payload: []byte("bye"), QoS: 1, Retain: true}})
 
@@ -130,7 +130,7 @@ func TestConnectDisconnectV311(t *testing.T) {
 
 func TestConnectV5Properties(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newTestClient(t, b, Options{CleanStart: true, ProtocolVersion: MQTT5,
+	c, rec := newTestClient(t, b, Server{CleanStart: true, ProtocolVersion: MQTT5,
 		ConnectProperties: &Properties{SessionExpiryInterval: 30, SessionExpiryIntervalFlag: true,
 			User: []UserProperty{{Key: "k", Val: "v"}}}})
 	res := connectAsync(c, 5*time.Second)
@@ -159,7 +159,7 @@ func TestConnectV5Properties(t *testing.T) {
 
 func TestReceiveMaximumFromConnectProperties(t *testing.T) {
 	b := newFakeBroker(t)
-	c, _ := newTestClient(t, b, Options{CleanStart: true, ProtocolVersion: MQTT5, ReceiveMaximum: 7,
+	c, _ := newTestClient(t, b, Server{CleanStart: true, ProtocolVersion: MQTT5, ReceiveMaximum: 7,
 		ConnectProperties: &Properties{ReceiveMaximum: 3}})
 	connectAsync(c, 5*time.Second)
 	if got := b.accept().readConnect().Properties.ReceiveMaximum; got != 3 {
@@ -182,7 +182,7 @@ func TestConnackRefused(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newFakeBroker(t)
-			c, rec := newTestClient(t, b, Options{ClientID: "c", CleanStart: true, ProtocolVersion: tc.version})
+			c, rec := newTestClient(t, b, Server{ClientID: "c", CleanStart: true, ProtocolVersion: tc.version})
 			res := connectAsync(c, 5*time.Second)
 			fc := b.accept()
 			fc.readConnect()
@@ -253,7 +253,7 @@ func TestProtocolErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newFakeBroker(t)
-			c, rec := newTestClient(t, b, Options{ClientID: tc.clientID, CleanStart: true, ProtocolVersion: tc.version})
+			c, rec := newTestClient(t, b, Server{ClientID: tc.clientID, CleanStart: true, ProtocolVersion: tc.version})
 			connectAsync(c, 5*time.Second)
 			fc := b.accept()
 			fc.readConnect()
@@ -281,7 +281,7 @@ func TestServerDisconnect(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newFakeBroker(t)
-			c, rec := newTestClient(t, b, Options{ClientID: "c", CleanStart: true, ProtocolVersion: MQTT5})
+			c, rec := newTestClient(t, b, Server{ClientID: "c", CleanStart: true, ProtocolVersion: MQTT5})
 			res := connectAsync(c, 5*time.Second)
 			fc := b.accept()
 			fc.readConnect()
@@ -305,7 +305,7 @@ func TestServerDisconnect(t *testing.T) {
 func TestKeepalive(t *testing.T) {
 	b := newFakeBroker(t)
 	// Server Keep Alive overrides the client's 60s so the test runs quickly.
-	c, rec := newTestClient(t, b, Options{ClientID: "c", CleanStart: true, KeepAlive: 60, ProtocolVersion: MQTT5})
+	c, rec := newTestClient(t, b, Server{ClientID: "c", CleanStart: true, KeepAlive: 60, ProtocolVersion: MQTT5})
 	res := connectAsync(c, 5*time.Second)
 	fc := b.accept()
 	fc.readConnect()
@@ -335,7 +335,7 @@ func TestKeepalive(t *testing.T) {
 
 func TestConnectContextCancelled(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newTestClient(t, b, Options{ClientID: "c", CleanStart: true})
+	c, rec := newTestClient(t, b, Server{ClientID: "c", CleanStart: true})
 	res := connectAsync(c, 200*time.Millisecond)
 	fc := b.accept()
 	fc.readConnect() // never answered
@@ -350,7 +350,7 @@ func TestConnectContextCancelled(t *testing.T) {
 
 func TestConnectionLost(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newTestClient(t, b, Options{ClientID: "c", CleanStart: true})
+	c, rec := newTestClient(t, b, Server{ClientID: "c", CleanStart: true})
 	res := connectAsync(c, 5*time.Second)
 	fc := b.accept()
 	fc.readConnect()
@@ -379,7 +379,7 @@ func TestDisconnectV5Reason(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newFakeBroker(t)
-			c, rec := newTestClient(t, b, Options{ClientID: "c", CleanStart: true, ProtocolVersion: MQTT5})
+			c, rec := newTestClient(t, b, Server{ClientID: "c", CleanStart: true, ProtocolVersion: MQTT5})
 			res := connectAsync(c, 5*time.Second)
 			fc := b.accept()
 			fc.readConnect()
@@ -401,7 +401,7 @@ func TestDisconnectV5Reason(t *testing.T) {
 func TestDisconnectFromCallback(t *testing.T) {
 	b := newFakeBroker(t)
 	done := make(chan DisconnectEvent, 1)
-	c, err := New(Options{Server: b.url(), ClientID: "c", CleanStart: true}, Handlers{
+	c, err := New(single(Server{Address: b.address(), ClientID: "c", CleanStart: true}), Handlers{
 		OnConnect:    func(c *Client, _ ConnAck) { _ = c.Disconnect(context.Background(), 0, nil) },
 		OnDisconnect: func(_ *Client, ev DisconnectEvent) { done <- ev },
 	})
@@ -425,8 +425,8 @@ func TestDisconnectFromCallback(t *testing.T) {
 
 func TestPreConnectAndSetters(t *testing.T) {
 	b := newFakeBroker(t)
-	c, err := New(Options{Server: b.url(), ClientID: "c", CleanStart: true,
-		Will: &Message{Topic: "w", Payload: []byte("x")}}, Handlers{
+	c, err := New(single(Server{Address: b.address(), ClientID: "c", CleanStart: true,
+		Will: &Message{Topic: "w", Payload: []byte("x")}}), Handlers{
 		OnPreConnect: func(c *Client) { _ = c.SetCredentials("late", []byte("pw")) },
 	})
 	if err != nil {
@@ -447,7 +447,7 @@ func TestPreConnectAndSetters(t *testing.T) {
 
 func TestMQTT31(t *testing.T) {
 	b := newFakeBroker(t)
-	c, _ := newTestClient(t, b, Options{CleanStart: true, ProtocolVersion: MQTT31})
+	c, _ := newTestClient(t, b, Server{CleanStart: true, ProtocolVersion: MQTT31})
 	if id := c.ClientID(); !strings.HasPrefix(id, "mosq-") || len(id) != 23 {
 		t.Fatalf("generated id %q", id)
 	}
@@ -461,35 +461,38 @@ func TestMQTT31(t *testing.T) {
 func TestOptionsValidation(t *testing.T) {
 	cases := []struct {
 		name string
-		opts Options
+		opts Server
 		want error
 	}{
-		{"empty id without clean start", Options{Server: "mqtt://h"}, ErrInvalid},
-		{"keepalive below 5", Options{Server: "mqtt://h", CleanStart: true, KeepAlive: 4}, ErrInvalid},
-		{"bad protocol version", Options{Server: "mqtt://h", CleanStart: true, ProtocolVersion: 6}, ErrInvalid},
-		{"password without username", Options{Server: "mqtt://h", CleanStart: true, Password: []byte("p")}, ErrInvalid},
-		{"wildcard will topic", Options{Server: "mqtt://h", CleanStart: true, Will: &Message{Topic: "a/#"}}, ErrInvalid},
-		{"will qos 3", Options{Server: "mqtt://h", CleanStart: true, Will: &Message{Topic: "a", QoS: 3}}, ErrInvalid},
-		{"connect properties on 3.1.1", Options{Server: "mqtt://h", CleanStart: true, ConnectProperties: &Properties{}}, ErrNotSupported},
-		{"will properties on 3.1.1", Options{Server: "mqtt://h", CleanStart: true, Will: &Message{Topic: "a", Properties: &Properties{}}}, ErrNotSupported},
-		{"websocket scheme", Options{Server: "ws://h", CleanStart: true}, ErrInvalid},
-		{"missing host", Options{Server: "mqtt://", CleanStart: true}, ErrInvalid},
-		{"tls config on plain server", Options{Server: "mqtt://h", CleanStart: true, TLSConfig: tlsConfig()}, ErrInvalid},
+		{"empty id without clean start", Server{Address: "h:1883"}, ErrInvalid},
+		{"keepalive below 5", Server{Address: "h:1883", CleanStart: true, KeepAlive: 4}, ErrInvalid},
+		{"bad protocol version", Server{Address: "h:1883", CleanStart: true, ProtocolVersion: 6}, ErrInvalid},
+		{"password without username", Server{Address: "h:1883", CleanStart: true, Password: []byte("p")}, ErrInvalid},
+		{"wildcard will topic", Server{Address: "h:1883", CleanStart: true, Will: &Message{Topic: "a/#"}}, ErrInvalid},
+		{"will qos 3", Server{Address: "h:1883", CleanStart: true, Will: &Message{Topic: "a", QoS: 3}}, ErrInvalid},
+		{"connect properties on 3.1.1", Server{Address: "h:1883", CleanStart: true, ConnectProperties: &Properties{}}, ErrNotSupported},
+		{"will properties on 3.1.1", Server{Address: "h:1883", CleanStart: true, Will: &Message{Topic: "a", Properties: &Properties{}}}, ErrNotSupported},
+		{"url instead of address", Server{Address: "mqtt://h:1883", CleanStart: true}, ErrInvalid},
+		{"missing port", Server{Address: "h", CleanStart: true}, ErrInvalid},
+		{"port out of range", Server{Address: "h:65536", CleanStart: true}, ErrInvalid},
+		{"port zero", Server{Address: "h:0", CleanStart: true}, ErrInvalid},
+		{"missing host", Server{Address: ":1883", CleanStart: true}, ErrInvalid},
+		{"tls config without tls", Server{Address: "h:8883", CleanStart: true, TLSConfig: tlsConfig()}, ErrInvalid},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := New(tc.opts, Handlers{}); !errors.Is(err, tc.want) {
+			if _, err := New(single(tc.opts), Handlers{}); !errors.Is(err, tc.want) {
 				t.Fatalf("New err %v, want %v", err, tc.want)
 			}
 		})
 	}
-	if _, err := New(Options{Server: "mqtts://h", CleanStart: true, TLSConfig: tlsConfig()}, Handlers{}); err != nil {
+	if _, err := New(single(Server{Address: "h:8883", TLS: true, CleanStart: true, TLSConfig: tlsConfig()}), Handlers{}); err != nil {
 		t.Fatalf("valid TLS options: %v", err)
 	}
 }
 
 func TestDisconnectV311RejectsReason(t *testing.T) {
-	c, err := New(Options{Server: "mqtt://h", CleanStart: true}, Handlers{})
+	c, err := New(single(Server{Address: "h:1883", CleanStart: true}), Handlers{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,3 +500,6 @@ func TestDisconnectV311RejectsReason(t *testing.T) {
 		t.Fatalf("err %v", err)
 	}
 }
+
+// single returns options for the one server s.
+func single(s Server) Options { return Options{Servers: []Server{s}} }

@@ -110,15 +110,20 @@ func wait(t *testing.T, p *mqttclient.Pending) mqttclient.Result {
 	return res
 }
 
+// single returns options for the one server s.
+func single(s mqttclient.Server) mqttclient.Options {
+	return mqttclient.Options{Servers: []mqttclient.Server{s}}
+}
+
 func subscribeOnConnect(topic string) func(*mqttclient.Client, mqttclient.ConnAck) {
 	return func(c *mqttclient.Client, _ mqttclient.ConnAck) {
 		_, _ = c.Subscribe(context.Background(), []mqttclient.Subscription{{Topic: topic, QoS: 1}}, nil)
 	}
 }
 
-func options(b *broker, version byte, id string) mqttclient.Options {
-	return mqttclient.Options{
-		Server:          b.url(),
+func options(b *broker, version byte, id string) mqttclient.Server {
+	return mqttclient.Server{
+		Address:         b.address(),
 		ProtocolVersion: version,
 		ClientID:        id,
 		CleanStart:      true,
@@ -137,7 +142,7 @@ func TestReconnectAfterBrokerKill(t *testing.T) {
 			b := newBroker(t, false)
 			b.start()
 			ev := newEvents()
-			c, err := mqttclient.New(options(b, v, "kill-test"), ev.handlers(subscribeOnConnect("it/#")))
+			c, err := mqttclient.New(single(options(b, v, "kill-test")), ev.handlers(subscribeOnConnect("it/#")))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -166,7 +171,7 @@ func TestReconnectAfterBrokerKill(t *testing.T) {
 func TestBrokerDownAtStart(t *testing.T) {
 	b := newBroker(t, false)
 	ev := newEvents()
-	c, err := mqttclient.New(options(b, mqttclient.MQTT5, "late-test"), ev.handlers(nil))
+	c, err := mqttclient.New(single(options(b, mqttclient.MQTT5, "late-test")), ev.handlers(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +192,7 @@ func TestSessionResumption(t *testing.T) {
 	opts := options(b, mqttclient.MQTT311, "resume-test")
 	opts.CleanStart = false
 	first := true
-	c, err := mqttclient.New(opts, ev.handlers(func(c *mqttclient.Client, a mqttclient.ConnAck) {
+	c, err := mqttclient.New(single(opts), ev.handlers(func(c *mqttclient.Client, a mqttclient.ConnAck) {
 		if first {
 			first = false
 			subscribeOnConnect("resume/#")(c, a)
@@ -221,7 +226,7 @@ func TestRunCancelSendsNoWill(t *testing.T) {
 	b.start()
 
 	watch := newEvents()
-	w, err := mqttclient.New(options(b, mqttclient.MQTT5, "will-watch"), watch.handlers(subscribeOnConnect("will/#")))
+	w, err := mqttclient.New(single(options(b, mqttclient.MQTT5, "will-watch")), watch.handlers(subscribeOnConnect("will/#")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +237,7 @@ func TestRunCancelSendsNoWill(t *testing.T) {
 	opts := options(b, mqttclient.MQTT5, "will-test")
 	opts.Will = &mqttclient.Message{Topic: "will/test", Payload: []byte("gone")}
 	ev := newEvents()
-	c, err := mqttclient.New(opts, ev.handlers(nil))
+	c, err := mqttclient.New(single(opts), ev.handlers(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +265,7 @@ func TestDisconnectWhileBrokerDown(t *testing.T) {
 	opts.ReconnectDelay = time.Second
 	opts.ReconnectDelayMax = time.Minute
 	opts.ReconnectExponential = true
-	c, err := mqttclient.New(opts, ev.handlers(nil))
+	c, err := mqttclient.New(single(opts), ev.handlers(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,4 +286,37 @@ func TestDisconnectWhileBrokerDown(t *testing.T) {
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("Run took %v to stop", d)
 	}
+}
+
+// With two brokers, killing the one in use moves Run to the other, and the
+// message published during the outage completes there.
+func TestFailoverToSecondBroker(t *testing.T) {
+	b1, b2 := newBroker(t, false), newBroker(t, false)
+	b1.start()
+	b2.start()
+	ev := newEvents()
+	opts := mqttclient.Options{Servers: []mqttclient.Server{
+		options(b1, mqttclient.MQTT311, "failover-test"),
+		options(b2, mqttclient.MQTT5, "failover-test"),
+	}}
+	c, err := mqttclient.New(opts, ev.handlers(subscribeOnConnect("it/#")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run(t, c)
+	next(t, ev.connects, "connection to the first broker")
+	if i := c.ServerIndex(); i != 0 {
+		t.Fatalf("ServerIndex %d, want 0", i)
+	}
+
+	b1.kill()
+	next(t, ev.disconnects, "OnDisconnect")
+	during := publish(t, c, "it/during", "1", 1) // queued until reconnected
+	next(t, ev.connects, "connection to the second broker")
+	if i := c.ServerIndex(); i != 1 {
+		t.Fatalf("ServerIndex %d, want 1", i)
+	}
+	wait(t, during)
+	wait(t, publish(t, c, "it/after", "2", 1))
+	ev.message(t, "it/after")
 }

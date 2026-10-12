@@ -15,7 +15,7 @@ type subRecorder struct {
 	unsubacks chan []byte
 }
 
-func newSubClient(t *testing.T, b *fakeBroker, opts Options) (*Client, *subRecorder) {
+func newSubClient(t *testing.T, b *fakeBroker, opts Server) (*Client, *subRecorder) {
 	t.Helper()
 	c, pr := newPubClient(t, b, opts)
 	rec := &subRecorder{pubRecorder: pr, subacks: make(chan []byte, 10), unsubacks: make(chan []byte, 10)}
@@ -46,7 +46,7 @@ func subscribeOK(t *testing.T, c *Client, subs []Subscription, props *Properties
 
 func TestSubscribeV311(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newSubClient(t, b, Options{})
+	c, rec := newSubClient(t, b, Server{})
 	fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 
 	// MQTT 5 options are dropped for 3.1.1, as libmosquitto does.
@@ -68,7 +68,7 @@ func TestSubscribeV311(t *testing.T) {
 
 func TestSubscribeV5OptionsAndProperties(t *testing.T) {
 	b := newFakeBroker(t)
-	c, _ := newSubClient(t, b, Options{ProtocolVersion: MQTT5})
+	c, _ := newSubClient(t, b, Server{ProtocolVersion: MQTT5})
 	fc := handshake(t, b, c, connackBytes(t, 5, 0, false, nil))
 
 	p := subscribeOK(t, c, []Subscription{{Topic: "a", QoS: 2, NoLocal: true, RetainAsPublished: true, RetainHandling: 1}},
@@ -86,7 +86,7 @@ func TestSubscribeV5OptionsAndProperties(t *testing.T) {
 // still in the Result.
 func TestSubackFailure(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newSubClient(t, b, Options{})
+	c, rec := newSubClient(t, b, Server{})
 	fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 
 	p := subscribeOK(t, c, []Subscription{{Topic: "a"}, {Topic: "b", QoS: 1}}, nil)
@@ -103,7 +103,7 @@ func TestSubackFailure(t *testing.T) {
 func TestUnsubscribe(t *testing.T) {
 	t.Run("v311 has no reason codes", func(t *testing.T) {
 		b := newFakeBroker(t)
-		c, rec := newSubClient(t, b, Options{})
+		c, rec := newSubClient(t, b, Server{})
 		fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 		p, err := c.Unsubscribe(context.Background(), []string{"a", "b"}, nil)
 		if err != nil {
@@ -120,7 +120,7 @@ func TestUnsubscribe(t *testing.T) {
 	})
 	t.Run("v5 reason codes and properties", func(t *testing.T) {
 		b := newFakeBroker(t)
-		c, _ := newSubClient(t, b, Options{ProtocolVersion: MQTT5})
+		c, _ := newSubClient(t, b, Server{ProtocolVersion: MQTT5})
 		fc := handshake(t, b, c, connackBytes(t, 5, 0, false, nil))
 		p, err := c.Unsubscribe(context.Background(), []string{"a", "b"}, &Properties{User: []UserProperty{{Key: "k", Val: "v"}}})
 		if err != nil {
@@ -136,7 +136,7 @@ func TestUnsubscribe(t *testing.T) {
 
 func TestSubscribeChecks(t *testing.T) {
 	b := newFakeBroker(t)
-	c, _ := newSubClient(t, b, Options{ProtocolVersion: MQTT5})
+	c, _ := newSubClient(t, b, Server{ProtocolVersion: MQTT5})
 	if _, err := c.Subscribe(context.Background(), []Subscription{{Topic: "a"}}, nil); !errors.Is(err, ErrNoConn) {
 		t.Fatalf("disconnected: %v", err)
 	}
@@ -179,7 +179,8 @@ func TestSubscribeChecks(t *testing.T) {
 
 func TestNoTopicCheck(t *testing.T) {
 	b := newFakeBroker(t)
-	c, _ := newSubClient(t, b, Options{NoTopicCheck: true})
+	c, _ := newSubClient(t, b, Server{})
+	c.opts.NoTopicCheck = true
 	fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 
 	subscribeOK(t, c, []Subscription{{Topic: "a/#/+"}}, nil)
@@ -194,7 +195,7 @@ func TestNoTopicCheck(t *testing.T) {
 
 func TestSubscribeV311Properties(t *testing.T) {
 	b := newFakeBroker(t)
-	c, _ := newSubClient(t, b, Options{})
+	c, _ := newSubClient(t, b, Server{})
 	handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 	if _, err := c.Subscribe(context.Background(), []Subscription{{Topic: "a"}}, &Properties{}); !errors.Is(err, ErrNotSupported) {
 		t.Fatalf("err %v", err)
@@ -205,7 +206,7 @@ func TestSubscribeV311Properties(t *testing.T) {
 // connection closes, and its mid is free again.
 func TestSubscribeFailsOnConnectionLoss(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newSubClient(t, b, Options{})
+	c, rec := newSubClient(t, b, Server{})
 	fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 	p := subscribeOK(t, c, []Subscription{{Topic: "a"}}, nil)
 	fc.readRaw()
@@ -240,7 +241,7 @@ func TestSubackProtocolErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newFakeBroker(t)
-			c, rec := newSubClient(t, b, Options{ProtocolVersion: MQTT5})
+			c, rec := newSubClient(t, b, Server{ProtocolVersion: MQTT5})
 			fc := handshake(t, b, c, connackBytes(t, 5, 0, false, nil))
 			p := subscribeOK(t, c, []Subscription{{Topic: "a"}}, nil)
 			fc.readRaw()
@@ -256,7 +257,7 @@ func TestSubackProtocolErrors(t *testing.T) {
 	}
 	t.Run("unknown suback ignored", func(t *testing.T) {
 		b := newFakeBroker(t)
-		c, rec := newSubClient(t, b, Options{})
+		c, rec := newSubClient(t, b, Server{})
 		fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 		fc.send(0x90, 0x03, 0x00, 0x09, 0x00)
 		fc.send(0xC0, 0x00)
@@ -272,7 +273,7 @@ func TestSubackProtocolErrors(t *testing.T) {
 // A subscribed client receives its own message back (03-publish-loop).
 func TestSubscribeAndReceive(t *testing.T) {
 	b := newFakeBroker(t)
-	c, rec := newSubClient(t, b, Options{})
+	c, rec := newSubClient(t, b, Server{})
 	fc := handshake(t, b, c, connackBytes(t, 4, 0, false, nil))
 	subscribeOK(t, c, []Subscription{{Topic: "a/+"}}, nil)
 	fc.readRaw()

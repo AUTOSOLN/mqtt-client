@@ -78,9 +78,10 @@ func (c *Client) Publish(ctx context.Context, m *Message) (*Pending, error) {
 	}
 	msg := *m
 	c.mu.Lock()
-	if !c.retainAvailable {
+	if !c.server().retainAvailable {
 		msg.Retain = false
 	}
+	version := c.server().ProtocolVersion
 	c.mu.Unlock()
 
 	s := &c.sess
@@ -91,7 +92,7 @@ func (c *Client) Publish(ctx context.Context, m *Message) (*Pending, error) {
 	}
 	probe := msg
 	probe.Mid = 1 // only its presence matters for the size
-	probePk := newPublish(c.opts.ProtocolVersion, &probe, false)
+	probePk := newPublish(version, &probe, false)
 	if err := s.checkSize(&probePk); err != nil {
 		return nil, err
 	}
@@ -107,7 +108,7 @@ func (c *Client) Publish(ctx context.Context, m *Message) (*Pending, error) {
 	deadline, _ := ctx.Deadline()
 
 	if msg.QoS == 0 {
-		pk := newPublish(c.opts.ProtocolVersion, &msg, false)
+		pk := newPublish(s.cn.version, &msg, false)
 		if err := s.cn.write(&pk, deadline); err != nil {
 			return nil, err
 		}
@@ -151,7 +152,7 @@ func (c *Client) checkPublish(m *Message) error {
 		return fmt.Errorf("%w: payload of %d bytes", ErrInvalid, len(m.Payload))
 	}
 	if p := m.Properties; p != nil {
-		if c.opts.ProtocolVersion != MQTT5 {
+		if c.version() != MQTT5 {
 			return fmt.Errorf("%w: PUBLISH properties require MQTT 5", ErrNotSupported)
 		}
 		if p.TopicAlias != 0 || p.TopicAliasFlag {
