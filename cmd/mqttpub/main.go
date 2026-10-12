@@ -6,6 +6,11 @@
 // It does not subscribe (mqttsub does), but messages arrive when it resumes
 // a persistent session that has subscriptions; see README.md.
 //
+// With -config it reconnects, failing over between the servers in the
+// file. QoS 1 and 2 messages wait for the next connection; QoS 0 messages
+// published while disconnected are dropped and counted. -timeout must then
+// allow for the reconnect: it is how long to wait without a completion.
+//
 // Examples:
 //
 //	mqttpub -t test/a -m hello -q 1
@@ -13,6 +18,7 @@
 //	mqttpub -v 5 -t test/a -content-type text/plain -user k=v -response-topic test/reply
 //	mqttpub -id inbox -clean=false -t test/a -q 2 -n 3 -listen 2s
 //	mqttpub -t test/big -size 65536 -size-step 65536 -n 16 -pattern ascii -sync
+//	mqttpub -config brokers.yaml -t test/a -q 1 -n 100 -interval 1s -timeout 1m
 package main
 
 import (
@@ -143,11 +149,12 @@ func (cfg *config) payload(n int) []byte {
 	return []byte(strings.ReplaceAll(cfg.message, "{n}", strconv.Itoa(n)))
 }
 
-// stats counts messages. completed and refused are updated by the
-// publishing goroutine from Pending results; received by OnMessage.
+// stats counts messages. completed, refused and dropped are updated by the
+// publishing goroutine; received by OnMessage.
 type stats struct {
 	completed int
 	refused   int
+	dropped   int // QoS 0 while reconnecting (-config)
 	received  atomic.Int64
 }
 
@@ -174,7 +181,7 @@ func publish(ctx context.Context, cfg *config, props *mqttclient.Properties) err
 	if cfg.reason != 0 && s.Version != mqttclient.MQTT5 {
 		return errors.New("-reason requires -v 5")
 	}
-	if _, err := s.Connect(ctx); err != nil {
+	if err := s.Start(ctx); err != nil {
 		return err
 	}
 
@@ -206,6 +213,9 @@ func publish(ctx context.Context, cfg *config, props *mqttclient.Properties) err
 	if st.refused > 0 {
 		return fmt.Errorf("%d messages refused by the server", st.refused)
 	}
+	if st.dropped > 0 {
+		return fmt.Errorf("%d QoS 0 messages dropped while disconnected", st.dropped)
+	}
 	return nil
 }
 
@@ -213,21 +223,16 @@ func publish(ctx context.Context, cfg *config, props *mqttclient.Properties) err
 func sendAll(ctx context.Context, cfg *config, s *cli.Session, props *mqttclient.Properties, st *stats) ([]*mqttclient.Pending, error) {
 	var pending []*mqttclient.Pending
 	for n := 1; n <= cfg.count; n++ {
-		m := &mqttclient.Message{Topic: cfg.topic, Payload: cfg.payload(n), QoS: byte(cfg.qos), Retain: cfg.retain, Properties: props}
-		pctx, cancel := context.WithTimeout(ctx, cfg.conn.Timeout)
-		p, err := s.C.Publish(pctx, m)
-		cancel()
-		if err != nil {
-			return pending, fmt.Errorf("publish %d: %w", n, err)
-		}
-		if !cfg.quiet {
-			cli.Logf("Publish mid=%d qos=%d retain=%v topic=%q bytes=%d", p.Mid, m.QoS, m.Retain, m.Topic, len(m.Payload))
-		}
-		if cfg.sync {
+		p, err := publishOne(ctx, cfg, s, props, st, n)
+		switch {
+		case err != nil:
+			return pending, err
+		case p == nil: // dropped
+		case cfg.sync:
 			if err := waitAll(cfg, s, []*mqttclient.Pending{p}, st); err != nil {
 				return nil, err
 			}
-		} else {
+		default:
 			pending = append(pending, p)
 		}
 		if cfg.interval > 0 && n < cfg.count {
@@ -240,6 +245,27 @@ func sendAll(ctx context.Context, cfg *config, s *cli.Session, props *mqttclient
 		}
 	}
 	return pending, nil
+}
+
+// publishOne publishes message n. With -config, a QoS 0 message that cannot
+// be sent while reconnecting is counted as dropped and p is nil.
+func publishOne(ctx context.Context, cfg *config, s *cli.Session, props *mqttclient.Properties, st *stats, n int) (*mqttclient.Pending, error) {
+	m := &mqttclient.Message{Topic: cfg.topic, Payload: cfg.payload(n), QoS: byte(cfg.qos), Retain: cfg.retain, Properties: props}
+	ctx, cancel := context.WithTimeout(ctx, cfg.conn.Timeout)
+	defer cancel()
+	p, err := s.C.Publish(ctx, m)
+	if errors.Is(err, mqttclient.ErrNoConn) && s.Reconnects() {
+		st.dropped++
+		cli.Logf("publish %d: dropped, not connected", n)
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("publish %d: %w", n, err)
+	}
+	if !cfg.quiet {
+		cli.Logf("Publish mid=%d qos=%d retain=%v topic=%q bytes=%d", p.Mid, m.QoS, m.Retain, m.Topic, len(m.Payload))
+	}
+	return p, nil
 }
 
 // waitAll waits for every pending message to complete and counts the

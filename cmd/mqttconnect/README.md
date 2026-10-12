@@ -29,6 +29,7 @@ go build -o build/mqttconnect ./cmd/mqttconnect
 | Flag | Default | Meaning |
 |---|---|---|
 | `-address` | `localhost:1883` | Broker address as `host:port` (IP address or hostname; the port is required) |
+| `-config` | empty | YAML file of one or more servers to use instead of `-address`; see [Several brokers](../mqttpub/README.md#several-brokers--config). Not with `-steps tcp`. |
 | `-tls` | `false` | Connect with TLS. Never inferred from the port |
 | `-steps` | `connect,disconnect` | `tcp`, `connect` or `connect,disconnect` |
 | `-v` | `311` | Protocol version: `31`, `311` or `5` |
@@ -132,6 +133,19 @@ keyfile  /path/server.key
 ```sh
 build/mqttconnect -repeat 100 -id loop
 ```
+
+### Several brokers and failover
+
+With `-config`, the connect step runs `Client.Run`: it fails over between the servers until one
+accepts, and while it holds the connection it reconnects whenever the connection is lost. The
+file format is described in the [mqttpub README](../mqttpub/README.md#several-brokers--config).
+
+```sh
+build/mqttconnect -config cmd/brokers.example.yaml -hold 5m
+```
+
+Stop the broker it connected to. The log shows `OnDisconnect`, then `connecting to server …` and
+`OnConnectError` lines as it tries the servers in turn, and `OnConnect` once one accepts.
 
 ### Failure cases
 

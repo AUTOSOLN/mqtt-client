@@ -1,6 +1,6 @@
 // Package cli holds what the manual test tools under cmd share: the
-// connection flags, building a client from them, connect and disconnect
-// with logging, and output helpers.
+// connection flags, building a client from them (or from a -config file of
+// servers), connect and disconnect with logging, and output helpers.
 package cli
 
 import (
@@ -13,42 +13,56 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	mqttclient "github.com/AUTOSOLN/mqtt-client"
 )
 
-// ConnFlags are the flags that describe a connection.
+// ConnFlags are the flags that describe a connection. The yaml tags name
+// the keys of a server in a -config file (see loadServers); "-" marks the
+// flags that apply to the whole client rather than to one server.
 type ConnFlags struct {
-	Address       string
-	TLS           bool
-	Version       string
-	ClientID      string
-	Clean         bool
-	KeepAlive     uint
-	SessionExpiry uint
-	Username      string
-	Password      string
-	Timeout       time.Duration
-	Debug         bool
+	Config string `yaml:"-"`
 
-	CAFile     string
-	CertFile   string
-	KeyFile    string
-	Insecure   bool
-	ServerName string
+	Address       string        `yaml:"address"`
+	TLS           bool          `yaml:"tls"`
+	Version       string        `yaml:"version"`
+	ClientID      string        `yaml:"client-id"`
+	Clean         bool          `yaml:"clean"`
+	KeepAlive     uint          `yaml:"keepalive"`
+	SessionExpiry uint          `yaml:"session-expiry"`
+	Username      string        `yaml:"username"`
+	Password      string        `yaml:"password"`
+	Timeout       time.Duration `yaml:"-"`
+	Debug         bool          `yaml:"-"`
 
-	WillTopic   string
-	WillPayload string
-	WillQoS     uint
-	WillRetain  bool
+	CAFile     string `yaml:"cafile"`
+	CertFile   string `yaml:"cert"`
+	KeyFile    string `yaml:"key"`
+	Insecure   bool   `yaml:"insecure"`
+	ServerName string `yaml:"servername"`
 
-	NoTopicCheck bool
+	WillTopic   string `yaml:"will-topic"`
+	WillPayload string `yaml:"will-payload"`
+	WillQoS     uint   `yaml:"will-qos"`
+	WillRetain  bool   `yaml:"will-retain"`
+
+	// Reconnect has flags only in tools that call Reconnect.Register, but
+	// a -config file may set it for any tool.
+	Reconnect ReconnectFlags `yaml:",inline"`
+
+	NoTopicCheck bool `yaml:"-"`
+
+	fs *flag.FlagSet
 }
 
 // Register adds the connection flags to fs.
 func (f *ConnFlags) Register(fs *flag.FlagSet) {
-	fs.StringVar(&f.Address, "address", "localhost:1883", "broker address as host:port, or a comma-separated list tried in turn")
+	f.fs = fs
+	f.Reconnect = defaultReconnect
+	fs.StringVar(&f.Config, "config", "", "YAML file of servers to connect to, reconnecting and failing over between them (replaces -address)")
+	fs.StringVar(&f.Address, "address", "localhost:1883", "broker address as host:port")
 	fs.BoolVar(&f.TLS, "tls", false, "connect with TLS")
 	fs.StringVar(&f.Version, "v", "311", "MQTT protocol version: 31, 311 or 5")
 	fs.StringVar(&f.ClientID, "id", "", "client id (empty requires -clean)")
@@ -111,31 +125,59 @@ func (f *ConnFlags) TLSConfig() (*tls.Config, error) {
 	return tc, nil
 }
 
-// Options builds client options from the flags.
+// Options builds client options from the flags: one server from -address,
+// or the servers listed in the -config file.
 func (f *ConnFlags) Options() (mqttclient.Options, error) {
+	opts := mqttclient.Options{NoTopicCheck: f.NoTopicCheck}
+	if f.Config != "" {
+		servers, err := f.loadServers()
+		if err != nil {
+			return mqttclient.Options{}, err
+		}
+		opts.Servers = servers
+	} else {
+		srv, err := f.Server()
+		if err != nil {
+			return mqttclient.Options{}, err
+		}
+		opts.Servers = []mqttclient.Server{srv}
+	}
+	if f.Debug {
+		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	}
+	return opts, nil
+}
+
+// Server builds one server's settings from the flags.
+func (f *ConnFlags) Server() (mqttclient.Server, error) {
 	version, err := f.ProtocolVersion()
 	if err != nil {
-		return mqttclient.Options{}, err
+		return mqttclient.Server{}, err
 	}
 	tc, err := f.TLSConfig()
 	if err != nil {
-		return mqttclient.Options{}, err
+		return mqttclient.Server{}, err
 	}
 	srv := mqttclient.Server{
-		TLS:             f.TLS,
-		ProtocolVersion: version,
-		ClientID:        f.ClientID,
-		CleanStart:      f.Clean,
-		KeepAlive:       uint16(f.KeepAlive),
-		Username:        f.Username,
-		TLSConfig:       tc,
+		Address:              f.Address,
+		TLS:                  f.TLS,
+		ProtocolVersion:      version,
+		ClientID:             f.ClientID,
+		CleanStart:           f.Clean,
+		KeepAlive:            uint16(f.KeepAlive),
+		Username:             f.Username,
+		TLSConfig:            tc,
+		ReconnectDelay:       f.Reconnect.Delay,
+		ReconnectDelayMax:    f.Reconnect.DelayMax,
+		ReconnectExponential: f.Reconnect.Exponential,
+		ConnectTimeout:       f.Reconnect.ConnectTimeout,
 	}
 	if f.Password != "" {
 		srv.Password = []byte(f.Password)
 	}
 	if f.SessionExpiry > 0 {
 		if version != mqttclient.MQTT5 {
-			return mqttclient.Options{}, errors.New("-session-expiry requires -v 5")
+			return mqttclient.Server{}, errors.New("-session-expiry requires -v 5")
 		}
 		srv.ConnectProperties = &mqttclient.Properties{SessionExpiryInterval: uint32(f.SessionExpiry), SessionExpiryIntervalFlag: true}
 	}
@@ -147,67 +189,76 @@ func (f *ConnFlags) Options() (mqttclient.Options, error) {
 			Retain:  f.WillRetain,
 		}
 	}
-	opts := mqttclient.Options{NoTopicCheck: f.NoTopicCheck}
-	for _, addr := range strings.Split(f.Address, ",") {
-		srv.Address = strings.TrimSpace(addr)
-		opts.Servers = append(opts.Servers, srv)
-	}
-	if f.Debug {
-		opts.Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	}
-	return opts, nil
+	return srv, nil
 }
 
-// ReconnectFlags are the flags for Run's reconnect behaviour. Only tools
-// that use Session.Run register them.
+// ReconnectFlags are Run's reconnect settings. Only tools that always run
+// Session.Run register them as flags; with -config, any tool reconnects and
+// takes them from the file.
 type ReconnectFlags struct {
-	Delay          time.Duration
-	DelayMax       time.Duration
-	Exponential    bool
-	ConnectTimeout time.Duration
+	Delay          time.Duration `yaml:"reconnect-delay"`
+	DelayMax       time.Duration `yaml:"reconnect-delay-max"`
+	Exponential    bool          `yaml:"reconnect-exponential"`
+	ConnectTimeout time.Duration `yaml:"connect-timeout"`
 }
+
+var defaultReconnect = ReconnectFlags{Delay: time.Second, DelayMax: 30 * time.Second, ConnectTimeout: 30 * time.Second}
 
 // Register adds the reconnect flags to fs.
 func (r *ReconnectFlags) Register(fs *flag.FlagSet) {
-	fs.DurationVar(&r.Delay, "reconnect-delay", time.Second, "wait before reconnecting")
-	fs.DurationVar(&r.DelayMax, "reconnect-delay-max", 30*time.Second, "longest wait before reconnecting")
-	fs.BoolVar(&r.Exponential, "reconnect-exponential", false, "grow the wait quadratically instead of linearly")
-	fs.DurationVar(&r.ConnectTimeout, "connect-timeout", 30*time.Second, "limit for each connection attempt")
-}
-
-// Apply sets the reconnect options of every server.
-func (r *ReconnectFlags) Apply(o *mqttclient.Options) {
-	for i := range o.Servers {
-		s := &o.Servers[i]
-		s.ReconnectDelay = r.Delay
-		s.ReconnectDelayMax = r.DelayMax
-		s.ReconnectExponential = r.Exponential
-		s.ConnectTimeout = r.ConnectTimeout
-	}
+	d := defaultReconnect
+	fs.DurationVar(&r.Delay, "reconnect-delay", d.Delay, "wait before reconnecting")
+	fs.DurationVar(&r.DelayMax, "reconnect-delay-max", d.DelayMax, "longest wait before reconnecting")
+	fs.BoolVar(&r.Exponential, "reconnect-exponential", d.Exponential, "grow the wait quadratically instead of linearly")
+	fs.DurationVar(&r.ConnectTimeout, "connect-timeout", d.ConnectTimeout, "limit for each connection attempt")
 }
 
 // Session is a client whose OnConnect, OnDisconnect and OnConnectError are
 // logged.
+//
+// With -config it reconnects by itself: Start runs the client's supervisor
+// (Client.Run), which reconnects and fails over between the servers, and
+// Lost reports only that Run gave up. Without -config, Start connects once
+// and Lost reports the end of that connection.
 type Session struct {
-	C       *mqttclient.Client
-	Version byte
-	timeout time.Duration
-	lost    chan mqttclient.DisconnectEvent
+	C          *mqttclient.Client
+	Version    byte // of the first server
+	reconnects bool
+	timeout    time.Duration
+	lost       chan mqttclient.DisconnectEvent
+	closed     chan mqttclient.DisconnectEvent // every OnDisconnect, for Disconnect
+	up         chan struct{}                   // closed on the first accepted connection
+	upOnce     sync.Once
+	stopRun    context.CancelFunc // ends Start's Run
+	runDone    chan struct{}      // closed when Start's Run returns
 }
 
 // NewSession creates a client from the flags. h supplies the other
 // handlers; its OnConnect, OnDisconnect and OnConnectError, if set, run
-// after the logging. Each of more adjusts the options.
-func NewSession(f *ConnFlags, h mqttclient.Handlers, more ...func(*mqttclient.Options)) (*Session, error) {
+// after the logging.
+func NewSession(f *ConnFlags, h mqttclient.Handlers) (*Session, error) {
 	opts, err := f.Options()
 	if err != nil {
 		return nil, err
 	}
-	for _, m := range more {
-		m(&opts)
+	s := &Session{
+		Version:    opts.Servers[0].ProtocolVersion,
+		reconnects: f.Config != "",
+		timeout:    f.Timeout,
+		lost:       make(chan mqttclient.DisconnectEvent, 1),
+		closed:     make(chan mqttclient.DisconnectEvent, 1),
+		up:         make(chan struct{}),
 	}
-	s := &Session{Version: opts.Servers[0].ProtocolVersion, timeout: f.Timeout, lost: make(chan mqttclient.DisconnectEvent, 1)}
-	onConnect, onDisconnect, onConnectError := h.OnConnect, h.OnDisconnect, h.OnConnectError
+	onPreConnect, onConnect, onDisconnect, onConnectError := h.OnPreConnect, h.OnConnect, h.OnDisconnect, h.OnConnectError
+	if s.reconnects {
+		h.OnPreConnect = func(c *mqttclient.Client) {
+			i := c.ServerIndex()
+			Logf("connecting to server %d of %d: %s", i+1, len(opts.Servers), opts.Servers[i].Address)
+			if onPreConnect != nil {
+				onPreConnect(c)
+			}
+		}
+	}
 	h.OnConnectError = func(c *mqttclient.Client, err error) {
 		Logf("OnConnectError %v", err)
 		if onConnectError != nil {
@@ -216,6 +267,14 @@ func NewSession(f *ConnFlags, h mqttclient.Handlers, more ...func(*mqttclient.Op
 	}
 	h.OnConnect = func(c *mqttclient.Client, ack mqttclient.ConnAck) {
 		Logf("OnConnect reason=0x%02x session_present=%v", ack.ReasonCode, ack.SessionPresent)
+		if s.reconnects && ack.ReasonCode == 0 {
+			// Connect is not called, so log what it would.
+			Logf("  connected to %s client_id=%q", opts.Servers[c.ServerIndex()].Address, c.ClientID())
+			if p := ack.Properties; p != nil {
+				Logf("  CONNACK properties:%s", ConnackProps(p))
+			}
+			s.upOnce.Do(func() { close(s.up) })
+		}
 		if onConnect != nil {
 			onConnect(c, ack)
 		}
@@ -228,9 +287,9 @@ func NewSession(f *ConnFlags, h mqttclient.Handlers, more ...func(*mqttclient.Op
 		if onDisconnect != nil {
 			onDisconnect(c, ev)
 		}
-		select {
-		case s.lost <- ev:
-		default:
+		send(s.closed, ev)
+		if !s.reconnects {
+			send(s.lost, ev)
 		}
 	}
 	s.C, err = mqttclient.New(opts, h)
@@ -240,10 +299,56 @@ func NewSession(f *ConnFlags, h mqttclient.Handlers, more ...func(*mqttclient.Op
 	return s, nil
 }
 
-// Lost receives the event when the connection ends.
+// send delivers ev if ch has room. Only the first undelivered event matters.
+func send(ch chan mqttclient.DisconnectEvent, ev mqttclient.DisconnectEvent) {
+	select {
+	case ch <- ev:
+	default:
+	}
+}
+
+// Reconnects reports whether the session reconnects by itself (-config).
+func (s *Session) Reconnects() bool { return s.reconnects }
+
+// Lost receives an event when the session is over without Disconnect: the
+// connection ended or, with -config, Run gave up on every server.
 func (s *Session) Lost() <-chan mqttclient.DisconnectEvent { return s.lost }
 
-// Connect connects and logs the result.
+// Start connects. Without -config it is Connect. With -config it starts
+// Run, which keeps reconnecting until Disconnect, and returns once the
+// first connection is accepted.
+func (s *Session) Start(ctx context.Context) error {
+	if !s.reconnects {
+		_, err := s.Connect(ctx)
+		return err
+	}
+	// Run gets its own context so that Ctrl-C (ctx) ends only this wait:
+	// once connected, the tool decides when to Disconnect, as without
+	// -config.
+	runCtx, stopRun := context.WithCancel(context.Background())
+	s.stopRun = stopRun
+	s.runDone = make(chan struct{})
+	go func() {
+		defer close(s.runDone)
+		if err := s.C.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+			Logf("giving up: %v", err)
+			send(s.lost, mqttclient.DisconnectEvent{Err: err})
+		}
+	}()
+	select {
+	case <-s.up:
+		return nil
+	case ev := <-s.lost:
+		stopRun()
+		return fmt.Errorf("connect: %w", ev.Err)
+	case <-ctx.Done():
+		stopRun()
+		<-s.runDone
+		return fmt.Errorf("connect: %w", ctx.Err())
+	}
+}
+
+// Connect connects once and logs the result.
 func (s *Session) Connect(ctx context.Context) (mqttclient.ConnAck, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
@@ -271,7 +376,7 @@ func (s *Session) Run(ctx context.Context) error {
 }
 
 // Hold stays connected for d, until ctx ends (Ctrl-C), or until the
-// connection is lost, which is an error.
+// session is lost (see Lost), which is an error.
 func (s *Session) Hold(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return nil
@@ -289,20 +394,33 @@ func (s *Session) Hold(ctx context.Context, d time.Duration) error {
 	return nil
 }
 
-// Disconnect sends DISCONNECT with reason and waits for OnDisconnect, which
-// runs on the client's dispatcher goroutine, so that its output is not lost
-// when the process exits.
+// Disconnect sends DISCONNECT with reason (with -config, it also stops Run)
+// and waits for OnDisconnect, which runs on the client's dispatcher
+// goroutine, so that its output is not lost when the process exits.
 func (s *Session) Disconnect(reason byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
 	defer cancel()
+	select {
+	case <-s.closed: // an earlier connection's, with -config
+	default:
+	}
+	connected := s.C.IsConnected()
 	if err := s.C.Disconnect(ctx, reason, nil); err != nil {
 		return fmt.Errorf("disconnect: %w", err)
 	}
-	Logf("disconnected")
-	select {
-	case <-s.lost:
-	case <-ctx.Done():
-		Logf("OnDisconnect not called within %v", s.timeout)
+	if connected {
+		Logf("disconnected")
+		select {
+		case <-s.closed:
+		case <-ctx.Done():
+			Logf("OnDisconnect not called within %v", s.timeout)
+		}
+	} else {
+		Logf("stopped reconnecting")
+	}
+	if s.runDone != nil {
+		s.stopRun()
+		<-s.runDone
 	}
 	return nil
 }

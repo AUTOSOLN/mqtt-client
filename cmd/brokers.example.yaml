@@ -1,0 +1,53 @@
+# Servers for the -config flag of mqttconnect, mqttpub, mqttsub and
+# interactiveclient. The client connects to the first that accepts,
+# reconnects when the connection is lost, and fails over to the next server
+# (cycling back to the first) when an attempt fails.
+#
+# The keys are the connection flags. A flag given on the command line is the
+# default for every server that does not set that key; address is required
+# for each server and -address cannot be combined with -config.
+#
+#   address                 host:port
+#   tls                     true | false
+#   version                 31 | 311 | 5
+#   client-id, clean, keepalive, session-expiry
+#   username, password
+#   cafile                  PEM file of CA certificates to trust
+#   cert, key               PEM client certificate and private key (mutual TLS)
+#   insecure                true: skip server certificate verification
+#   servername              TLS server name, if different from the address host
+#   will-topic, will-payload, will-qos, will-retain
+#   reconnect-delay, reconnect-delay-max, reconnect-exponential, connect-timeout
+#
+# -timeout, -debug and -no-topic-check apply to the whole client and stay
+# flags.
+
+servers:
+  - address: localhost:1883
+    version: 5
+    reconnect-delay: 500ms
+    reconnect-delay-max: 5s
+
+  - address: localhost:1884
+    version: 5
+    reconnect-delay: 500ms
+    reconnect-delay-max: 5s
+
+  # TLS, verifying the server against a private CA, with a password:
+  # - address: broker.example:8883
+  #   tls: true
+  #   cafile: ca.pem
+  #   username: alice
+  #   password: secret
+
+  # Mutual TLS: the client authenticates with a certificate:
+  # - address: broker.example:8884
+  #   tls: true
+  #   cafile: ca.pem
+  #   cert: client.pem
+  #   key: client.key
+
+  # TLS with a self-signed server certificate, not verified (testing only):
+  # - address: localhost:8883
+  #   tls: true
+  #   insecure: true

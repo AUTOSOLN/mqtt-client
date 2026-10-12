@@ -1,6 +1,7 @@
 // Command interactiveclient is a test application driven over MQTT. It runs
-// the client's supervisor (Client.Run), so it reconnects on its own, and
-// subscribes from OnConnect to two control topics under -root:
+// the client's supervisor (Client.Run), so it reconnects on its own (and,
+// with -config, fails over between several brokers), and subscribes from
+// OnConnect to two control topics under -root:
 //
 //	<root>/on     a non-zero number or true/on/yes switches publishing on;
 //	              0, false/off/no or an empty payload switches it off. A
@@ -17,6 +18,7 @@
 //
 //	interactiveclient
 //	interactiveclient -v 5 -root lab/demo -interval 500ms -period 10s
+//	interactiveclient -config brokers.yaml
 //	mosquitto_pub -t interactiveclient/on -m 1 -r     # start, and stay on across restarts
 //	mosquitto_pub -t interactiveclient/reset -m x     # back to 0
 //	mosquitto_pub -t interactiveclient/on -m 0 -r     # stop
@@ -40,7 +42,6 @@ import (
 
 type config struct {
 	conn      cli.ConnFlags
-	reconnect cli.ReconnectFlags
 	root      string
 	subQoS    uint
 	pubQoS    uint
@@ -58,7 +59,7 @@ func main() {
 func run() int {
 	var cfg config
 	cfg.conn.Register(flag.CommandLine)
-	cfg.reconnect.Register(flag.CommandLine)
+	cfg.conn.Reconnect.Register(flag.CommandLine)
 	flag.StringVar(&cfg.root, "root", "interactiveclient", "topic root for on, reset, sin and step")
 	flag.UintVar(&cfg.subQoS, "q", 1, "QoS for the on and reset subscriptions")
 	flag.UintVar(&cfg.pubQoS, "pub-qos", 0, "QoS for sin and step")
@@ -111,7 +112,7 @@ func (a *app) run(ctx context.Context) error {
 	s, err := cli.NewSession(&a.cfg.conn, mqttclient.Handlers{
 		OnConnect: a.onConnect,
 		OnMessage: a.onMessage,
-	}, a.cfg.reconnect.Apply)
+	})
 	if err != nil {
 		return err
 	}

@@ -10,12 +10,18 @@
 // connection, so the broker sees it drop without DISCONNECT and publishes
 // any Will.
 //
+// With -config, the connect step runs the client's supervisor
+// (Client.Run) with the servers in the file: it fails over until one
+// accepts the connection, and while held it reconnects, failing over
+// again, until -hold ends.
+//
 // Examples:
 //
 //	mqttconnect -address localhost:1883 -steps tcp
 //	mqttconnect -address localhost:1883 -v 5 -id test1 -hold 30s -debug
 //	mqttconnect -address broker:8883 -tls -cafile ca.pem -u user -P secret
 //	mqttconnect -steps connect -hold 5s -will-topic t/will -will-payload bye
+//	mqttconnect -config brokers.yaml -hold 5m
 package main
 
 import (
@@ -56,6 +62,9 @@ func run() int {
 	flag.Parse()
 
 	doTCP, doConnect, doDisconnect, err := parseSteps(cfg.steps)
+	if err == nil && doTCP && cfg.conn.Config != "" {
+		err = errors.New(`"tcp" takes -address, not -config`)
+	}
 	if err == nil {
 		_, err = cfg.conn.Options() // check the connection flags before any step
 	}
@@ -168,7 +177,7 @@ func connect(ctx context.Context, cfg *config, disconnect bool) error {
 	if cfg.reason != 0 && s.Version != mqttclient.MQTT5 {
 		return errors.New("-reason requires -v 5")
 	}
-	if _, err := s.Connect(ctx); err != nil {
+	if err := s.Start(ctx); err != nil {
 		return err
 	}
 	if err := s.Hold(ctx, cfg.hold); err != nil {

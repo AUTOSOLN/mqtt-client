@@ -31,6 +31,7 @@ Connection flags (shared with `mqttconnect`):
 | Flag | Default | Meaning |
 |---|---|---|
 | `-address` | `localhost:1883` | Broker address as `host:port` (IP address or hostname; the port is required) |
+| `-config` | empty | YAML file of one or more servers to use instead of `-address`; the tool then reconnects and fails over. See [Several brokers](#several-brokers--config). |
 | `-tls` | `false` | Connect with TLS. Never inferred from the port |
 | `-v` | `311` | Protocol version: `31`, `311` or `5` |
 | `-id` | empty | Client id. An empty id needs `-clean`. |
@@ -70,6 +71,48 @@ Publish flags:
 
 Exit status: 0 on success, 1 if any step fails or the broker refuses a message (MQTT 5 reason
 code 0x80 or above), 2 for invalid arguments.
+
+### Several brokers (-config)
+
+`-address` and the other connection flags describe exactly one broker, and the tool connects
+once (`Client.Connect`): a lost connection ends the run. `-config file.yaml` lists one or more
+brokers instead, and the tool runs the supervisor (`Client.Run`): it connects to the first broker
+that accepts, reconnects when the connection is lost, and fails over to the next broker when an
+attempt fails. This works the same way in `mqttconnect`, `mqttsub` and `interactiveclient`.
+
+```yaml
+servers:
+  - address: localhost:1883
+    version: 5
+    reconnect-delay: 500ms
+  - address: backup.example:8883
+    tls: true
+    cafile: ca.pem
+```
+
+The keys are the connection flags with longer names (`version`, `client-id`, `username`,
+`password`) plus the reconnect settings (`reconnect-delay`, `reconnect-delay-max`,
+`reconnect-exponential`, `connect-timeout`); see [brokers.example.yaml](../brokers.example.yaml)
+for the full list. A connection flag on the command line is the default for every broker that
+does not set that key, so `-v 5 -u alice -P secret -config brokers.yaml` uses those for all of
+them. Each broker needs its own `address`, and `-address` with `-config` is an error. A misspelt
+key is an error too. `-timeout`, `-debug` and `-no-topic-check` stay flags.
+
+With `-config`, `mqttpub` differs in three ways:
+
+- QoS 1 and 2 messages published while reconnecting are queued and sent on the next connection,
+  to whichever broker that is. Their `OnPublish` arrives late but the run still succeeds.
+- A QoS 0 message cannot be queued, so one published while disconnected is logged as `dropped`
+  and the run exits with status 1.
+- `-timeout` is how long to wait without any message completing, so it must cover the reconnect
+  delay. The msg/s figure includes time spent reconnecting.
+
+```sh
+build/mqttpub -config cmd/brokers.example.yaml -t test/a -q 1 -n 60 -interval 1s -timeout 1m
+```
+
+Stop and restart a broker while it runs. The log shows `OnDisconnect`, `connecting to server …`,
+the new `OnConnect`, and then the queued messages completing.
 
 ## Reading the output
 
@@ -195,12 +238,12 @@ well as `mosquitto_sub`.
 
 ### Resending after a lost connection
 
-`mqttpub` does not reconnect, but the client keeps unacknowledged QoS 1 and 2 messages across
-connections. On the next successful `Connect`, it resends them with DUP set, or resends PUBREL if
+Without `-config`, `mqttpub` does not reconnect, but the client keeps unacknowledged QoS 1 and 2
+messages across connections. On the next successful `Connect`, it resends them with DUP set, or resends PUBREL if
 PUBREC had already arrived. The unit test `TestResendAfterReconnect` and the conformance cases
 `03-publish-c2b-qos1-disconnect` and `03-publish-c2b-qos2-disconnect` cover this behaviour.
 For automatic reconnect (`Client.Run`, phase 4), see
-[interactiveclient](../interactiveclient/README.md).
+[Several brokers](#several-brokers--config) and [interactiveclient](../interactiveclient/README.md).
 
 ### Failure cases
 

@@ -44,7 +44,9 @@ go build -o build/interactiveclient ./cmd/interactiveclient
 
 The connection flags are the same as in the other tools: `-address`, `-tls`, `-v`, `-id`, `-clean`,
 `-session-expiry`, `-keepalive`, `-u`, `-P`, `-timeout`, `-debug`, TLS and Will. See the
-[mqttpub README](../mqttpub/README.md#flags).
+[mqttpub README](../mqttpub/README.md#flags). `-config brokers.yaml` replaces `-address` with
+several brokers to fail over between; see
+[Several brokers](../mqttpub/README.md#several-brokers--config).
 
 Reconnect flags. These map to the `ReconnectDelay`, `ReconnectDelayMax`, `ReconnectExponential`
 and `ConnectTimeout` options:
@@ -55,6 +57,9 @@ and `ConnectTimeout` options:
 | `-reconnect-delay-max` | `30s` | Longest wait. Wait *n* (from 0) is `delay × (n+1)`, capped here. A successful connection starts again from 0. |
 | `-reconnect-exponential` | `false` | Use `delay × (n+1)²` instead, as libmosquitto's "exponential" backoff does |
 | `-connect-timeout` | `30s` | Limit for each attempt, from dialling to CONNACK |
+
+With `-config`, these flags are the defaults for the brokers in the file, and each broker can set
+its own (`reconnect-delay: 2s`, …).
 
 Application flags:
 

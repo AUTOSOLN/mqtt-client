@@ -3,6 +3,9 @@
 // topic filters, prints messages until -C messages have arrived, -W has
 // passed or Ctrl-C, optionally unsubscribes (-unsub), then disconnects.
 //
+// With -config it reconnects, failing over between the servers in the
+// file, and subscribes again after every reconnect.
+//
 // Examples:
 //
 //	mqttsub -t 'test/#'
@@ -11,6 +14,7 @@
 //	mqttsub -id inbox -clean=false -t 'test/in/#' -q 1 -W 1s
 //	mqttsub -id inbox -clean=false -U 'test/in/#' -W 1s
 //	mqttsub -t test/big -verify ascii -quiet
+//	mqttsub -config brokers.yaml -t 'test/#' -q 1
 package main
 
 import (
@@ -122,9 +126,16 @@ func (cfg *config) subscriptions() ([]mqttclient.Subscription, *mqttclient.Prope
 }
 
 func subscribe(ctx context.Context, cfg *config) error {
-	var received, bad atomic.Int64
+	var received, bad, connects atomic.Int64
 	enough := make(chan struct{})
 	s, err := cli.NewSession(&cfg.conn, mqttclient.Handlers{
+		OnConnect: func(c *mqttclient.Client, ack mqttclient.ConnAck) {
+			// Subscriptions are not resent after a reconnect, and a server
+			// failed over to has none. The first subscribe is session's.
+			if ack.ReasonCode == 0 && connects.Add(1) > 1 {
+				resubscribe(c, cfg)
+			}
+		},
 		OnMessage: func(_ *mqttclient.Client, m *mqttclient.Message) {
 			n := received.Add(1)
 			if !cfg.quiet {
@@ -146,7 +157,7 @@ func subscribe(ctx context.Context, cfg *config) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.Connect(ctx); err != nil {
+	if err := s.Start(ctx); err != nil {
 		return err
 	}
 	err = session(ctx, cfg, s, enough)
@@ -213,6 +224,29 @@ func session(ctx context.Context, cfg *config, s *cli.Session, enough <-chan str
 		return unsubscribe(ctx, cfg, s, cfg.topics)
 	}
 	return nil
+}
+
+// resubscribe subscribes to the -t filters again after a reconnect (only
+// with -config: without it there is one connection). It runs in OnConnect,
+// so it waits for the SUBACK on another goroutine to keep messages flowing.
+func resubscribe(c *mqttclient.Client, cfg *config) {
+	if len(cfg.topics) == 0 {
+		return
+	}
+	subs, props := cfg.subscriptions()
+	p, err := c.Subscribe(context.Background(), subs, props)
+	if err != nil {
+		cli.Logf("resubscribe: %v", err)
+		return
+	}
+	go func() {
+		res, err := waitFor(context.Background(), cfg, p)
+		if res.ReasonCodes == nil {
+			cli.Logf("resubscribe: %v", err)
+			return
+		}
+		cli.Logf("SUBACK mid=%d (resubscribed) reason codes %v", p.Mid, res.ReasonCodes)
+	}()
 }
 
 // receive waits for -C messages, -W, Ctrl-C or the connection to end.
