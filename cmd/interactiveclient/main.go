@@ -80,7 +80,7 @@ func run() int {
 	a := newApp(&cfg)
 	if err := a.run(ctx); err != nil {
 		cli.Logf("FAIL: %v", err)
-		return 1
+		return cli.ExitCode(err)
 	}
 	return 0
 }

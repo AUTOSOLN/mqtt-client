@@ -68,9 +68,52 @@ Publish flags:
 | `-correlation` | empty | Correlation Data property (needs `-v 5`) |
 | `-expiry` | `0` | Message Expiry Interval in seconds (needs `-v 5`) |
 | `-user` | | User property `key=value` (needs `-v 5`). Repeat the flag to add more than one. |
+| `-report` | empty | Write a JSON [run report](#run-report--report) to this file when the run ends; `-` writes it to stdout and moves the log to stderr |
 
-Exit status: 0 on success, 1 if any step fails or the broker refuses a message (MQTT 5 reason
-code 0x80 or above), 2 for invalid arguments.
+Exit status:
+- **0:** success.
+- **1:** a step failed or the broker refused a message (MQTT 5 reason code 0x80 or above).
+- **2:** a setup error: invalid arguments, or no session with a broker at all (bad TLS files or `-config`,
+  the connection refused or timed out, a TLS failure, a refused CONNACK, or with `-config`, every
+  server failing). Losing a connection that was established is a 1.
+
+### Run report (-report)
+
+`-report file` writes one JSON object when the run ends, so that a test harness can read the
+result instead of parsing the log. It is written on every exit path, including invalid arguments
+and a failed connection (both `exit` 2), though not for a flag that fails to parse. `-report -` writes it
+to stdout and sends the log to stderr, so stdout is only the JSON. Without `-report`, the output
+and exit status do not change. If the report cannot be written, the tool says so on stderr and
+exits with status 2.
+
+```json
+{
+  "tool": "mqttpub",
+  "schema": 1,
+  "ok": true,
+  "exit": 0,
+  "exit_reason": "all 200 messages acknowledged",
+  "server": { "address": "localhost:1883", "protocol": "311", "tls": false },
+  "session_present": false,
+  "connack_reason": 0,
+  "counts": { "published": 200, "acked": 200, "refused": 0, "dropped": 0, "received": 0, "verify_failed": 0 },
+  "verify": { "pattern": "", "size": -1, "first_bad_offset": -1, "first_bad_message": 0 },
+  "latency_ms": { "p50": 1.49, "p95": 2.886, "p99": 3.129, "max": 41.023 },
+  "duration_ms": 47
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `schema` | Report format version. Keys are added, never renamed or removed. |
+| `ok`, `exit` | `ok` is `exit == 0`; `exit` is the process exit status. |
+| `exit_reason` | The error that ended the run, or a summary of a successful one. |
+| `server` | The broker of the latest CONNACK (with `-config`, the one failed over to), or before one, the first. `protocol` is as `-v`: `31`, `311` or `5`. |
+| `session_present`, `connack_reason` | From the latest CONNACK; `null` if none arrived. A refused CONNACK has its code here and `session_present` false. |
+| `counts` | `published`: accepted by `Client.Publish`. `acked`: completed without a failure reason code (for QoS 0, written, as QoS 0 has no acknowledgement). `refused`: completed with reason code 0x80 or above. `dropped`: QoS 0 lost while reconnecting. `received`: messages from the broker (`-listen`, resumed sessions). `verify_failed` is always 0 for `mqttpub`. |
+| `verify` | With `-size`, the `-pattern` and first payload size sent; otherwise `""` and -1. `first_bad_offset` is -1 and `first_bad_message` 0, since `mqttpub` checks nothing. |
+| `latency_ms` | QoS 1 and 2 only: milliseconds from `Client.Publish` returning to the PUBACK or PUBCOMP, as nearest-rank percentiles. Left out at QoS 0 and when the run fails. |
+| `duration_ms` | Wall time of the run. |
 
 ### Several brokers (-config)
 
@@ -122,6 +165,8 @@ the new `OnConnect`, and then the queued messages completing.
 | `OnPublish mid=… reason=…` | The message is complete: QoS 0 written, QoS 1 PUBACK, QoS 2 PUBCOMP, or a failed PUBREC. |
 | `OnMessage mid=… qos=… topic=… payload=…` | A message from the broker, followed by any MQTT 5 properties. QoS 1 messages are printed after PUBACK is sent, QoS 2 after PUBREL arrives. |
 | `completed N of M in … (… msg/s), K refused` | Summary, counted from the `Pending` results |
+
+For a summary a program can read, use [`-report`](#run-report--report).
 
 Callbacks run on the client's own goroutine, so the lines from `OnConnect`, `OnPublish` and
 `OnMessage` can appear interleaved with the tool's own lines.

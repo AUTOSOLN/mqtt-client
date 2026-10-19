@@ -19,6 +19,7 @@
 //	mqttpub -id inbox -clean=false -t test/a -q 2 -n 3 -listen 2s
 //	mqttpub -t test/big -size 65536 -size-step 65536 -n 16 -pattern ascii -sync
 //	mqttpub -config brokers.yaml -t test/a -q 1 -n 100 -interval 1s -timeout 1m
+//	mqttpub -t test/a -q 1 -n 100 -quiet -report -
 package main
 
 import (
@@ -26,10 +27,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -52,6 +55,7 @@ type config struct {
 	listen   time.Duration
 	reason   uint
 	quiet    bool
+	report   string
 
 	contentType   string
 	utf8          bool
@@ -62,50 +66,54 @@ type config struct {
 }
 
 func main() {
-	os.Exit(run())
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func run() int {
+func run(args []string, stdout, stderr io.Writer) int {
 	var cfg config
-	cfg.conn.Register(flag.CommandLine)
-	flag.StringVar(&cfg.topic, "t", "mqttclient/test", "topic to publish to")
-	flag.StringVar(&cfg.message, "m", "hello {n}", "payload; {n} is replaced by the message number")
-	flag.IntVar(&cfg.size, "size", 0, "send a payload of this many bytes of -pattern instead of -m")
-	flag.IntVar(&cfg.sizeStep, "size-step", 0, "grow -size by this many bytes for each message after the first")
-	flag.StringVar(&cfg.pattern, "pattern", "alpha", "-size payload pattern: "+cli.PatternNames())
-	flag.UintVar(&cfg.qos, "q", 0, "QoS: 0, 1 or 2")
-	flag.BoolVar(&cfg.retain, "r", false, "retain flag")
-	flag.IntVar(&cfg.count, "n", 1, "number of messages (0 publishes nothing, for -listen)")
-	flag.DurationVar(&cfg.interval, "interval", 0, "pause between messages")
-	flag.BoolVar(&cfg.sync, "sync", false, "wait for each message to complete before the next")
-	flag.DurationVar(&cfg.listen, "listen", 0, "stay connected this long after publishing and print received messages (Ctrl-C ends it)")
-	flag.UintVar(&cfg.reason, "reason", 0, "DISCONNECT reason code (MQTT 5 only)")
-	flag.BoolVar(&cfg.quiet, "quiet", false, "print only failures and the summary, not every message")
-	flag.StringVar(&cfg.contentType, "content-type", "", "Content Type property (MQTT 5)")
-	flag.BoolVar(&cfg.utf8, "utf8", false, "set Payload Format Indicator to UTF-8 (MQTT 5)")
-	flag.StringVar(&cfg.responseTopic, "response-topic", "", "Response Topic property (MQTT 5)")
-	flag.StringVar(&cfg.correlation, "correlation", "", "Correlation Data property (MQTT 5)")
-	flag.UintVar(&cfg.expiry, "expiry", 0, "Message Expiry Interval in seconds (MQTT 5)")
-	flag.Var(&cfg.user, "user", "user property key=value (MQTT 5, repeatable)")
-	flag.Parse()
+	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	fs.SetOutput(stderr)
+	cfg.conn.Register(fs)
+	fs.StringVar(&cfg.topic, "t", "mqttclient/test", "topic to publish to")
+	fs.StringVar(&cfg.message, "m", "hello {n}", "payload; {n} is replaced by the message number")
+	fs.IntVar(&cfg.size, "size", 0, "send a payload of this many bytes of -pattern instead of -m")
+	fs.IntVar(&cfg.sizeStep, "size-step", 0, "grow -size by this many bytes for each message after the first")
+	fs.StringVar(&cfg.pattern, "pattern", "alpha", "-size payload pattern: "+cli.PatternNames())
+	fs.UintVar(&cfg.qos, "q", 0, "QoS: 0, 1 or 2")
+	fs.BoolVar(&cfg.retain, "r", false, "retain flag")
+	fs.IntVar(&cfg.count, "n", 1, "number of messages (0 publishes nothing, for -listen)")
+	fs.DurationVar(&cfg.interval, "interval", 0, "pause between messages")
+	fs.BoolVar(&cfg.sync, "sync", false, "wait for each message to complete before the next")
+	fs.DurationVar(&cfg.listen, "listen", 0, "stay connected this long after publishing and print received messages (Ctrl-C ends it)")
+	fs.UintVar(&cfg.reason, "reason", 0, "DISCONNECT reason code (MQTT 5 only)")
+	fs.BoolVar(&cfg.quiet, "quiet", false, "print only failures and the summary, not every message")
+	fs.StringVar(&cfg.contentType, "content-type", "", "Content Type property (MQTT 5)")
+	fs.BoolVar(&cfg.utf8, "utf8", false, "set Payload Format Indicator to UTF-8 (MQTT 5)")
+	fs.StringVar(&cfg.responseTopic, "response-topic", "", "Response Topic property (MQTT 5)")
+	fs.StringVar(&cfg.correlation, "correlation", "", "Correlation Data property (MQTT 5)")
+	fs.UintVar(&cfg.expiry, "expiry", 0, "Message Expiry Interval in seconds (MQTT 5)")
+	fs.Var(&cfg.user, "user", "user property key=value (MQTT 5, repeatable)")
+	fs.StringVar(&cfg.report, "report", "", "write a JSON run report to this file on exit; - writes it to stdout and the log to stderr")
+	_ = fs.Parse(args)
+	rep := cli.NewReport("mqttpub", cfg.report, &cfg.conn, stdout, stderr)
 
 	props, err := cfg.properties()
 	if err == nil {
 		err = cfg.checkSize()
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "mqttpub:", err)
-		return 2
+		fmt.Fprintln(stderr, "mqttpub:", err)
+		return rep.Finish(2, err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	if err := publish(ctx, &cfg, props); err != nil {
+	if err := publish(ctx, &cfg, props, rep); err != nil {
 		cli.Logf("FAIL: %v", err)
-		return 1
+		return rep.Finish(cli.ExitCode(err), err)
 	}
 	cli.Logf("OK")
-	return 0
+	return rep.Finish(0, nil)
 }
 
 // properties builds the PUBLISH properties from the flags, or nil if none
@@ -149,17 +157,58 @@ func (cfg *config) payload(n int) []byte {
 	return []byte(strings.ReplaceAll(cfg.message, "{n}", strconv.Itoa(n)))
 }
 
-// stats counts messages. completed, refused and dropped are updated by the
-// publishing goroutine; received by OnMessage.
+// stats counts messages. published, completed, refused and dropped are
+// updated by the publishing goroutine; received by OnMessage; latency (with
+// -report) by a goroutine per QoS 1 and 2 message.
 type stats struct {
+	published int
 	completed int
 	refused   int
 	dropped   int // QoS 0 while reconnecting (-config)
 	received  atomic.Int64
+
+	latency cli.Latencies
+	timing  sync.WaitGroup
 }
 
-func publish(ctx context.Context, cfg *config, props *mqttclient.Properties) error {
+// timeAck records the time from sent to p's acknowledgement.
+func (st *stats) timeAck(p *mqttclient.Pending, sent time.Time) {
+	defer st.timing.Done()
+	<-p.Done()
+	if _, err := p.Wait(context.Background()); err == nil {
+		st.latency.Add(time.Since(sent))
+	}
+}
+
+// fill puts the counts in rep. err is publish's result.
+func (st *stats) fill(rep *cli.Report, cfg *config, err error) {
+	if err == nil {
+		st.timing.Wait() // every message is complete
+		rep.LatencyMs = st.latency.Summary()
+	}
+	rep.Counts.Published = int64(st.published)
+	rep.Counts.Acked = int64(st.completed - st.refused)
+	rep.Counts.Refused = int64(st.refused)
+	rep.Counts.Dropped = int64(st.dropped)
+	rep.Counts.Received = st.received.Load()
+	if cfg.size > 0 {
+		rep.Verify.Pattern, rep.Verify.Size = cfg.pattern, cfg.size
+	}
+	switch {
+	case st.completed == cfg.count && cfg.qos > 0:
+		rep.ExitReason = fmt.Sprintf("all %d messages acknowledged", st.completed)
+	case st.completed == cfg.count:
+		rep.ExitReason = fmt.Sprintf("all %d messages sent", st.completed)
+	default:
+		rep.ExitReason = fmt.Sprintf("%d of %d messages completed", st.completed, cfg.count)
+	}
+}
+
+func publish(ctx context.Context, cfg *config, props *mqttclient.Properties, rep *cli.Report) (err error) {
 	var st stats
+	if rep.Enabled() {
+		defer func() { st.fill(rep, cfg, err) }()
+	}
 	s, err := cli.NewSession(&cfg.conn, mqttclient.Handlers{
 		OnPublish: func(_ *mqttclient.Client, mid uint16, reason byte, _ *mqttclient.Properties) {
 			if reason >= 0x80 {
@@ -178,8 +227,9 @@ func publish(ctx context.Context, cfg *config, props *mqttclient.Properties) err
 	if err != nil {
 		return err
 	}
+	rep.SetSession(s)
 	if cfg.reason != 0 && s.Version != mqttclient.MQTT5 {
-		return errors.New("-reason requires -v 5")
+		return cli.Setup(errors.New("-reason requires -v 5"))
 	}
 	if err := s.Start(ctx); err != nil {
 		return err
@@ -261,6 +311,11 @@ func publishOne(ctx context.Context, cfg *config, s *cli.Session, props *mqttcli
 	}
 	if err != nil {
 		return nil, fmt.Errorf("publish %d: %w", n, err)
+	}
+	st.published++
+	if cfg.report != "" && m.QoS > 0 {
+		st.timing.Add(1)
+		go st.timeAck(p, time.Now())
 	}
 	if !cfg.quiet {
 		cli.Logf("Publish mid=%d qos=%d retain=%v topic=%q bytes=%d", p.Mid, m.QoS, m.Retain, m.Topic, len(m.Payload))

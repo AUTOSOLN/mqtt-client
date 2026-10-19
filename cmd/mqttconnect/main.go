@@ -83,13 +83,13 @@ func run() int {
 		var err error
 		switch {
 		case doTCP:
-			err = tcpOnly(ctx, &cfg.conn)
+			err = cli.Setup(tcpOnly(ctx, &cfg.conn)) // it only connects
 		case doConnect:
 			err = connect(ctx, &cfg, doDisconnect)
 		}
 		if err != nil {
 			cli.Logf("FAIL: %v", err)
-			return 1
+			return cli.ExitCode(err)
 		}
 		if ctx.Err() != nil {
 			break
@@ -175,7 +175,7 @@ func connect(ctx context.Context, cfg *config, disconnect bool) error {
 		return err
 	}
 	if cfg.reason != 0 && s.Version != mqttclient.MQTT5 {
-		return errors.New("-reason requires -v 5")
+		return cli.Setup(errors.New("-reason requires -v 5"))
 	}
 	if err := s.Start(ctx); err != nil {
 		return err
