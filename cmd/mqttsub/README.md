@@ -49,6 +49,7 @@ SUBACK and UNSUBACK.
 | `-quiet` | `false` | Don't print each message |
 | `-verify` | | Check every payload is this `mqttpub -pattern` (`alpha`, `ascii`, `01`, `binary`) and print its size, even with `-quiet`. A payload that doesn't match fails the run, with the offset of the first bad byte. |
 | `-verify-size` | | With `-verify`, also require payloads of exactly this many bytes |
+| `-expect-session` | empty | `0` or `1`: fail (exit 1) unless the CONNACK Session Present flag is this, checked before subscribing. `1` needs `-clean=false`. With `-config`, read [-expect-session and -config](#-expect-session-and--config). Without the flag, the flag is only printed. |
 | `-report` | empty | Write a JSON run report to this file when the run ends; `-` writes it to stdout and moves the log to stderr. See below. |
 
 Exit status:
@@ -57,6 +58,22 @@ Exit status:
 - **2:** a setup error: invalid arguments, or no session with a broker at all (bad TLS files or `-config`,
   the connection refused or timed out, a TLS failure, a refused CONNACK, or with `-config`, every
   server failing). Losing a connection that was established is a 1.
+
+### -expect-session and -config
+
+`-expect-session` checks one CONNACK: the first one the broker accepts. With `-config`, keep in mind:
+
+- The first accepted CONNACK may come from any server in the file: the first that accepts, after
+  failing over past any that refuse or cannot be reached. A refused CONNACK carries no session and
+  is not checked. To assert a session on a particular node, use `-address` instead.
+- After a reconnect or failover, Session Present is **not** checked again. Each `OnConnect … session_present=…`
+  line in the log shows it, but a session lost on failover does not fail the run. To test that,
+  run the tool a second time against the other node with `-expect-session 1`.
+- The [run report](../mqttpub/README.md#run-report--report)'s `session_present` and `server` are
+  from the *latest* CONNACK, so after a reconnect they can differ from the CONNACK that was checked.
+- `-expect-session 1` needs `-clean=false`, but that is checked only for `-address`. With
+  `-config`, each server can set `clean`, so a server with `clean: true` fails the check at run time
+  (exit 1), not as an invalid argument (exit 2).
 
 ### Run report (-report)
 
@@ -161,6 +178,16 @@ build/mqttsub -id inbox -clean=false -U 'test/in/#' -W 1s           # receives t
                                                                     # then removes the subscription
 build/mqttconnect -id inbox                                         # remove the session
 ```
+
+To make the run fail when the session is not resumed, for example after a broker restart or a
+failover to another node, add `-expect-session 1`:
+
+```sh
+build/mqttsub -id inbox -clean=false -expect-session 1 -t 'test/in/#' -q 2 -W 1s
+```
+
+It exits 1 with `CONNACK session present is 0, want 1 (-expect-session)` when the broker has no
+session for `inbox`. `-expect-session 0` checks the opposite, that the session is gone.
 
 ### Unsubscribe reason codes (MQTT 5)
 

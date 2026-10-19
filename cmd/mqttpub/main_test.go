@@ -155,3 +155,63 @@ OK
 		t.Errorf("with -report file: exit %d stderr %q, log\n%s", code, stderr, strings.Join(got, "\n"))
 	}
 }
+
+func TestExpectSession(t *testing.T) {
+	for _, tc := range []struct {
+		brokerSP bool
+		expect   string
+		code     int
+	}{
+		{true, "1", 0},
+		{false, "1", 1},
+		{false, "0", 0},
+		{true, "0", 1},
+	} {
+		b := &clitest.Broker{SessionPresent: tc.brokerSP}
+		b.Start(t)
+		code, stdout, stderr := runTool(t, "-address", b.Addr(), "-id", "s1", "-clean=false", "-q", "1",
+			"-expect-session", tc.expect, "-report", "-")
+		if code != tc.code {
+			t.Errorf("broker session present %v, -expect-session %s: exit %d, want %d\n%s", tc.brokerSP, tc.expect, code, tc.code, stderr)
+			continue
+		}
+		r := decode(t, stdout)
+		if r.SessionPresent == nil || *r.SessionPresent != tc.brokerSP || r.ExpectSession == nil || *r.ExpectSession != (tc.expect == "1") {
+			t.Errorf("-expect-session %s: session_present=%v expect_session=%v", tc.expect, r.SessionPresent, r.ExpectSession)
+		}
+		if tc.code == 0 {
+			if !r.OK || r.Counts.Acked != 1 || !strings.Contains(stderr, "session present is "+tc.expect+", as expected") {
+				t.Errorf("-expect-session %s: %+v\n%s", tc.expect, r, stderr)
+			}
+		} else if r.OK || r.Counts.Published != 0 || !strings.Contains(r.ExitReason, "want "+tc.expect+" (-expect-session)") {
+			t.Errorf("-expect-session %s: %+v", tc.expect, r)
+		}
+	}
+}
+
+func TestExpectSessionArguments(t *testing.T) {
+	for _, args := range [][]string{
+		{"-expect-session", "1"}, // -clean defaults to true
+		{"-expect-session", "yes", "-clean=false", "-id", "s1"},
+	} {
+		code, stdout, _ := runTool(t, append(args, "-report", "-")...)
+		if code != 2 {
+			t.Errorf("%v: exit %d, want 2", args, code)
+		}
+		if r := decode(t, stdout); r.OK || !strings.Contains(r.ExitReason, "-expect-session") {
+			t.Errorf("%v: %+v", args, r)
+		}
+	}
+}
+
+func TestNoExpectSession(t *testing.T) {
+	b := &clitest.Broker{SessionPresent: true}
+	b.Start(t)
+	code, stdout, _ := runTool(t, "-address", b.Addr(), "-id", "s1", "-clean=false", "-report", "-")
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if r := decode(t, stdout); r.ExpectSession != nil || r.SessionPresent == nil || !*r.SessionPresent {
+		t.Errorf("expect_session=%v session_present=%v", r.ExpectSession, r.SessionPresent)
+	}
+}

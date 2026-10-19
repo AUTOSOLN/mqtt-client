@@ -51,6 +51,9 @@ type config struct {
 	verify     string
 	verifySize int
 	report     string
+
+	expectSession string
+	wantSession   *bool // parsed -expect-session
 }
 
 func main() {
@@ -77,11 +80,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&cfg.quiet, "quiet", false, "print only the subscription results and the summary, not every message")
 	fs.StringVar(&cfg.verify, "verify", "", "check every payload is this mqttpub -pattern ("+cli.PatternNames()+") and print its size")
 	fs.IntVar(&cfg.verifySize, "verify-size", -1, "with -verify, also require payloads of exactly this many bytes")
+	fs.StringVar(&cfg.expectSession, "expect-session", "", "fail unless the CONNACK Session Present flag is this: 0 or 1")
 	fs.StringVar(&cfg.report, "report", "", "write a JSON run report to this file on exit; - writes it to stdout and the log to stderr")
 	_ = fs.Parse(args)
 	rep := cli.NewReport("mqttsub", cfg.report, &cfg.conn, stdout, stderr)
 
-	if err := cfg.check(); err != nil {
+	err := cfg.check()
+	if err == nil {
+		cfg.wantSession, err = cli.ParseExpectSession(cfg.expectSession, &cfg.conn)
+		rep.ExpectSession = cfg.wantSession
+	}
+	if err != nil {
 		fmt.Fprintln(stderr, "mqttsub:", err)
 		return rep.Finish(2, err)
 	}
@@ -181,6 +190,10 @@ func subscribe(ctx context.Context, cfg *config, rep *cli.Report) error {
 	}
 	rep.SetSession(s)
 	if err := s.Start(ctx); err != nil {
+		return err
+	}
+	if err := s.CheckSessionPresent(cfg.wantSession); err != nil {
+		_ = s.Disconnect(byte(cfg.reason))
 		return err
 	}
 	err = session(ctx, cfg, s, enough)

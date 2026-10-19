@@ -237,6 +237,7 @@ type Session struct {
 	mu     sync.Mutex
 	ack    *mqttclient.ConnAck // the latest CONNACK
 	server int                 // index of its server
+	first  *mqttclient.ConnAck // the first accepted CONNACK
 }
 
 // SetupError is an error that is not a test result: arguments found to be
@@ -348,6 +349,9 @@ func send(ch chan mqttclient.DisconnectEvent, ev mqttclient.DisconnectEvent) {
 func (s *Session) setConnAck(server int, ack mqttclient.ConnAck) {
 	s.mu.Lock()
 	s.ack, s.server = &ack, server
+	if s.first == nil && ack.ReasonCode == 0 {
+		s.first = &ack
+	}
 	s.mu.Unlock()
 }
 
@@ -357,6 +361,53 @@ func (s *Session) Connection() (mqttclient.Server, *mqttclient.ConnAck) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.servers[s.server], s.ack
+}
+
+// ParseExpectSession parses -expect-session: "" checks nothing; "0" or
+// "1" is the Session Present flag that the first accepted CONNACK must
+// have (see CheckSessionPresent).
+func ParseExpectSession(v string, f *ConnFlags) (*bool, error) {
+	var want bool
+	switch v {
+	case "":
+		return nil, nil
+	case "0":
+	case "1":
+		want = true
+		if f.Clean && f.Config == "" {
+			return nil, errors.New("-expect-session 1 needs -clean=false: a clean start never resumes a session")
+		}
+	default:
+		return nil, fmt.Errorf("-expect-session must be 0 or 1, not %q", v)
+	}
+	return &want, nil
+}
+
+// CheckSessionPresent fails unless the Session Present flag of the first
+// accepted CONNACK is want. With -config, later CONNACKs are not checked.
+// A nil want checks nothing. Call it after Start.
+func (s *Session) CheckSessionPresent(want *bool) error {
+	if want == nil {
+		return nil
+	}
+	s.mu.Lock()
+	ack := s.first
+	s.mu.Unlock()
+	if ack == nil {
+		return errors.New("-expect-session: no CONNACK accepted")
+	}
+	if ack.SessionPresent != *want {
+		return fmt.Errorf("CONNACK session present is %d, want %d (-expect-session)", b2i(ack.SessionPresent), b2i(*want))
+	}
+	Logf("session present is %d, as expected", b2i(*want))
+	return nil
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // Reconnects reports whether the session reconnects by itself (-config).
