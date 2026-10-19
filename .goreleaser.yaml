@@ -53,6 +53,9 @@ archives:
         dst: README-mqttpub.md
       - src: cmd/mqttsub/README.md
         dst: README-mqttsub.md
+      - src: cmd/mqttfuzz/scenarios/*.yaml
+        dst: scenarios
+        strip_parent: true
 
 checksum:
   name_template: checksums.txt
