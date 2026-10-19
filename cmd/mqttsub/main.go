@@ -15,6 +15,7 @@
 //	mqttsub -id inbox -clean=false -U 'test/in/#' -W 1s
 //	mqttsub -t test/big -verify ascii -quiet
 //	mqttsub -config brokers.yaml -t 'test/#' -q 1
+//	mqttsub -t test/big -verify binary -C 10 -W 1m -quiet -report -
 package main
 
 import (
@@ -22,6 +23,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"sync/atomic"
@@ -48,45 +50,50 @@ type config struct {
 	quiet      bool
 	verify     string
 	verifySize int
+	report     string
 }
 
 func main() {
-	os.Exit(run())
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func run() int {
+func run(args []string, stdout, stderr io.Writer) int {
 	var cfg config
-	cfg.conn.Register(flag.CommandLine)
-	flag.Var(&cfg.topics, "t", "topic filter to subscribe to (repeatable)")
-	flag.Var(&cfg.unsubFirst, "U", "topic filter to unsubscribe from right after connecting (repeatable)")
-	flag.UintVar(&cfg.qos, "q", 0, "requested QoS for every filter: 0, 1 or 2")
-	flag.BoolVar(&cfg.noLocal, "no-local", false, "No Local option: do not receive this client's own messages (MQTT 5)")
-	flag.BoolVar(&cfg.rap, "retain-as-published", false, "Retain As Published option (MQTT 5)")
-	flag.UintVar(&cfg.retainH, "retain-handling", 0, "Retain Handling option: 0 send retained, 1 only for new subscriptions, 2 never (MQTT 5)")
-	flag.UintVar(&cfg.subID, "sub-id", 0, "Subscription Identifier (MQTT 5)")
-	flag.Var(&cfg.user, "user", "SUBSCRIBE user property key=value (MQTT 5, repeatable)")
-	flag.BoolVar(&cfg.unsub, "unsub", false, "unsubscribe from the -t filters before disconnecting")
-	flag.Int64Var(&cfg.count, "C", 0, "exit after this many messages (0: no limit)")
-	flag.DurationVar(&cfg.wait, "W", 0, "exit after this long (0: until -C or Ctrl-C)")
-	flag.UintVar(&cfg.reason, "reason", 0, "DISCONNECT reason code (MQTT 5 only)")
-	flag.BoolVar(&cfg.quiet, "quiet", false, "print only the subscription results and the summary, not every message")
-	flag.StringVar(&cfg.verify, "verify", "", "check every payload is this mqttpub -pattern ("+cli.PatternNames()+") and print its size")
-	flag.IntVar(&cfg.verifySize, "verify-size", -1, "with -verify, also require payloads of exactly this many bytes")
-	flag.Parse()
+	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	fs.SetOutput(stderr)
+	cfg.conn.Register(fs)
+	fs.Var(&cfg.topics, "t", "topic filter to subscribe to (repeatable)")
+	fs.Var(&cfg.unsubFirst, "U", "topic filter to unsubscribe from right after connecting (repeatable)")
+	fs.UintVar(&cfg.qos, "q", 0, "requested QoS for every filter: 0, 1 or 2")
+	fs.BoolVar(&cfg.noLocal, "no-local", false, "No Local option: do not receive this client's own messages (MQTT 5)")
+	fs.BoolVar(&cfg.rap, "retain-as-published", false, "Retain As Published option (MQTT 5)")
+	fs.UintVar(&cfg.retainH, "retain-handling", 0, "Retain Handling option: 0 send retained, 1 only for new subscriptions, 2 never (MQTT 5)")
+	fs.UintVar(&cfg.subID, "sub-id", 0, "Subscription Identifier (MQTT 5)")
+	fs.Var(&cfg.user, "user", "SUBSCRIBE user property key=value (MQTT 5, repeatable)")
+	fs.BoolVar(&cfg.unsub, "unsub", false, "unsubscribe from the -t filters before disconnecting")
+	fs.Int64Var(&cfg.count, "C", 0, "exit after this many messages (0: no limit)")
+	fs.DurationVar(&cfg.wait, "W", 0, "exit after this long (0: until -C or Ctrl-C)")
+	fs.UintVar(&cfg.reason, "reason", 0, "DISCONNECT reason code (MQTT 5 only)")
+	fs.BoolVar(&cfg.quiet, "quiet", false, "print only the subscription results and the summary, not every message")
+	fs.StringVar(&cfg.verify, "verify", "", "check every payload is this mqttpub -pattern ("+cli.PatternNames()+") and print its size")
+	fs.IntVar(&cfg.verifySize, "verify-size", -1, "with -verify, also require payloads of exactly this many bytes")
+	fs.StringVar(&cfg.report, "report", "", "write a JSON run report to this file on exit; - writes it to stdout and the log to stderr")
+	_ = fs.Parse(args)
+	rep := cli.NewReport("mqttsub", cfg.report, &cfg.conn, stdout, stderr)
 
 	if err := cfg.check(); err != nil {
-		fmt.Fprintln(os.Stderr, "mqttsub:", err)
-		return 2
+		fmt.Fprintln(stderr, "mqttsub:", err)
+		return rep.Finish(2, err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	if err := subscribe(ctx, &cfg); err != nil {
+	if err := subscribe(ctx, &cfg, rep); err != nil {
 		cli.Logf("FAIL: %v", err)
-		return 1
+		return rep.Finish(cli.ExitCode(err), err)
 	}
 	cli.Logf("OK")
-	return 0
+	return rep.Finish(0, nil)
 }
 
 func (cfg *config) check() error {
@@ -125,8 +132,19 @@ func (cfg *config) subscriptions() ([]mqttclient.Subscription, *mqttclient.Prope
 	return subs, props
 }
 
-func subscribe(ctx context.Context, cfg *config) error {
+func subscribe(ctx context.Context, cfg *config, rep *cli.Report) error {
 	var received, bad, connects atomic.Int64
+	var badOffset, badMessage atomic.Int64 // of the first bad payload
+	badOffset.Store(-1)
+	if rep.Enabled() {
+		defer func() {
+			n := received.Load()
+			rep.Counts.Received = n
+			rep.Counts.VerifyFailed = bad.Load()
+			rep.Verify = cli.ReportVerify{Pattern: cfg.verify, Size: cfg.verifySize, FirstBadOffset: int(badOffset.Load()), FirstBadMessage: badMessage.Load()}
+			rep.ExitReason = fmt.Sprintf("received %d messages", n)
+		}()
+	}
 	enough := make(chan struct{})
 	s, err := cli.NewSession(&cfg.conn, mqttclient.Handlers{
 		OnConnect: func(c *mqttclient.Client, ack mqttclient.ConnAck) {
@@ -143,7 +161,11 @@ func subscribe(ctx context.Context, cfg *config) error {
 			}
 			if cfg.verify != "" {
 				if err := cli.VerifyPattern(cfg.verify, m.Payload, cfg.verifySize); err != nil {
-					bad.Add(1)
+					var pe *cli.PatternError
+					if bad.Add(1) == 1 && errors.As(err, &pe) {
+						badOffset.Store(int64(pe.Offset))
+						badMessage.Store(n)
+					}
 					cli.Logf("BAD message %d topic=%q bytes=%d: %v", n, m.Topic, len(m.Payload), err)
 				} else {
 					cli.Logf("verified message %d topic=%q bytes=%d", n, m.Topic, len(m.Payload))
@@ -157,6 +179,7 @@ func subscribe(ctx context.Context, cfg *config) error {
 	if err != nil {
 		return err
 	}
+	rep.SetSession(s)
 	if err := s.Start(ctx); err != nil {
 		return err
 	}

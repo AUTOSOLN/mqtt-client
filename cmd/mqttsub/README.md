@@ -49,11 +49,32 @@ SUBACK and UNSUBACK.
 | `-quiet` | `false` | Don't print each message |
 | `-verify` | | Check every payload is this `mqttpub -pattern` (`alpha`, `ascii`, `01`, `binary`) and print its size, even with `-quiet`. A payload that doesn't match fails the run, with the offset of the first bad byte. |
 | `-verify-size` | | With `-verify`, also require payloads of exactly this many bytes |
+| `-report` | empty | Write a JSON run report to this file when the run ends; `-` writes it to stdout and moves the log to stderr. See below. |
 
 Exit status:
 - **0:** success.
 - **1:** a step failed, every filter was refused, or `-W` ran out before `-C` messages arrived.
-- **2:** invalid arguments.
+- **2:** a setup error: invalid arguments, or no session with a broker at all (bad TLS files or `-config`,
+  the connection refused or timed out, a TLS failure, a refused CONNACK, or with `-config`, every
+  server failing). Losing a connection that was established is a 1.
+
+### Run report (-report)
+
+`-report` writes the same JSON object as
+[mqttpub's run report](../mqttpub/README.md#run-report--report), on every exit path. For
+`mqttsub`:
+
+- `counts.received` is the number of messages that arrived, and `counts.verify_failed` the number
+  that failed `-verify`. The publish counts are 0.
+- `verify` has the `-verify` pattern (`""` without it) and the `-verify-size` (-1 without it).
+  `first_bad_message` is the number of the first payload that failed, counting from 1, and
+  `first_bad_offset` its first wrong byte, or for a payload of the wrong size, the first byte
+  missing or extra. They are 0 and -1 when every payload matched.
+- `latency_ms` is left out.
+
+```sh
+build/mqttsub -t test/big -verify binary -verify-size 262144 -C 10 -W 1m -quiet -report -
+```
 
 ## Reading the output
 

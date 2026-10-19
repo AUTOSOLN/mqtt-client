@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -231,15 +232,50 @@ type Session struct {
 	upOnce     sync.Once
 	stopRun    context.CancelFunc // ends Start's Run
 	runDone    chan struct{}      // closed when Start's Run returns
+	servers    []mqttclient.Server
+
+	mu     sync.Mutex
+	ack    *mqttclient.ConnAck // the latest CONNACK
+	server int                 // index of its server
+}
+
+// SetupError is an error that is not a test result: arguments found to be
+// invalid after parsing, or failing to build the client, to connect, or
+// (with -config) to reconnect at all. The tools exit 2 for it (see
+// ExitCode), so that a test harness can tell a rig that never had a broker
+// session from a failed test. Losing an established connection is a test
+// result, not a SetupError.
+type SetupError struct{ Err error }
+
+func (e *SetupError) Error() string { return e.Err.Error() }
+func (e *SetupError) Unwrap() error { return e.Err }
+
+// Setup marks err as a *SetupError. It returns nil for nil.
+func Setup(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &SetupError{err}
+}
+
+// ExitCode is the exit status for an error that ended a run: 2 for a
+// *SetupError, otherwise 1.
+func ExitCode(err error) int {
+	var se *SetupError
+	if errors.As(err, &se) {
+		return 2
+	}
+	return 1
 }
 
 // NewSession creates a client from the flags. h supplies the other
 // handlers; its OnConnect, OnDisconnect and OnConnectError, if set, run
-// after the logging.
+// after the logging. Its errors, and those of Start and Run, are
+// *SetupError.
 func NewSession(f *ConnFlags, h mqttclient.Handlers) (*Session, error) {
 	opts, err := f.Options()
 	if err != nil {
-		return nil, err
+		return nil, Setup(err)
 	}
 	s := &Session{
 		Version:    opts.Servers[0].ProtocolVersion,
@@ -248,6 +284,7 @@ func NewSession(f *ConnFlags, h mqttclient.Handlers) (*Session, error) {
 		lost:       make(chan mqttclient.DisconnectEvent, 1),
 		closed:     make(chan mqttclient.DisconnectEvent, 1),
 		up:         make(chan struct{}),
+		servers:    opts.Servers,
 	}
 	onPreConnect, onConnect, onDisconnect, onConnectError := h.OnPreConnect, h.OnConnect, h.OnDisconnect, h.OnConnectError
 	if s.reconnects {
@@ -267,6 +304,7 @@ func NewSession(f *ConnFlags, h mqttclient.Handlers) (*Session, error) {
 	}
 	h.OnConnect = func(c *mqttclient.Client, ack mqttclient.ConnAck) {
 		Logf("OnConnect reason=0x%02x session_present=%v", ack.ReasonCode, ack.SessionPresent)
+		s.setConnAck(c.ServerIndex(), ack)
 		if s.reconnects && ack.ReasonCode == 0 {
 			// Connect is not called, so log what it would.
 			Logf("  connected to %s client_id=%q", opts.Servers[c.ServerIndex()].Address, c.ClientID())
@@ -294,7 +332,7 @@ func NewSession(f *ConnFlags, h mqttclient.Handlers) (*Session, error) {
 	}
 	s.C, err = mqttclient.New(opts, h)
 	if err != nil {
-		return nil, err
+		return nil, Setup(err)
 	}
 	return s, nil
 }
@@ -307,11 +345,26 @@ func send(ch chan mqttclient.DisconnectEvent, ev mqttclient.DisconnectEvent) {
 	}
 }
 
+func (s *Session) setConnAck(server int, ack mqttclient.ConnAck) {
+	s.mu.Lock()
+	s.ack, s.server = &ack, server
+	s.mu.Unlock()
+}
+
+// Connection returns the latest CONNACK, or nil before one, and its server
+// (before one, the first server).
+func (s *Session) Connection() (mqttclient.Server, *mqttclient.ConnAck) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.servers[s.server], s.ack
+}
+
 // Reconnects reports whether the session reconnects by itself (-config).
 func (s *Session) Reconnects() bool { return s.reconnects }
 
 // Lost receives an event when the session is over without Disconnect: the
-// connection ended or, with -config, Run gave up on every server.
+// connection ended or, with -config, Run gave up on every server (an Err
+// that is a *SetupError).
 func (s *Session) Lost() <-chan mqttclient.DisconnectEvent { return s.lost }
 
 // Start connects. Without -config it is Connect. With -config it starts
@@ -332,7 +385,7 @@ func (s *Session) Start(ctx context.Context) error {
 		defer close(s.runDone)
 		if err := s.C.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
 			Logf("giving up: %v", err)
-			send(s.lost, mqttclient.DisconnectEvent{Err: err})
+			send(s.lost, mqttclient.DisconnectEvent{Err: Setup(err)})
 		}
 	}()
 	select {
@@ -344,7 +397,7 @@ func (s *Session) Start(ctx context.Context) error {
 	case <-ctx.Done():
 		stopRun()
 		<-s.runDone
-		return fmt.Errorf("connect: %w", ctx.Err())
+		return Setup(fmt.Errorf("connect: %w", ctx.Err()))
 	}
 }
 
@@ -355,8 +408,9 @@ func (s *Session) Connect(ctx context.Context) (mqttclient.ConnAck, error) {
 	start := time.Now()
 	ack, err := s.C.Connect(ctx)
 	if err != nil {
-		return ack, fmt.Errorf("connect: %w", err)
+		return ack, Setup(fmt.Errorf("connect: %w", err))
 	}
+	s.setConnAck(s.C.ServerIndex(), ack)
 	Logf("connected in %v client_id=%q session_present=%v", Since(start), s.C.ClientID(), ack.SessionPresent)
 	if p := ack.Properties; p != nil {
 		Logf("  CONNACK properties:%s", ConnackProps(p))
@@ -372,7 +426,7 @@ func (s *Session) Run(ctx context.Context) error {
 		Logf("stopped")
 		return nil
 	}
-	return err
+	return Setup(err)
 }
 
 // Hold stays connected for d, until ctx ends (Ctrl-C), or until the
@@ -459,9 +513,24 @@ func ConnackProps(p *mqttclient.Properties) string {
 	return b.String()
 }
 
-// Logf prints a timestamped line to stdout.
+var (
+	logMu  sync.Mutex
+	logOut io.Writer = os.Stdout
+)
+
+// SetLogOutput directs Logf to w (stdout by default).
+func SetLogOutput(w io.Writer) {
+	logMu.Lock()
+	logOut = w
+	logMu.Unlock()
+}
+
+// Logf prints a timestamped line to stdout, or where SetLogOutput says.
 func Logf(format string, args ...any) {
-	fmt.Printf("%s %s\n", time.Now().Format("15:04:05.000"), fmt.Sprintf(format, args...))
+	line := fmt.Sprintf("%s %s\n", time.Now().Format("15:04:05.000"), fmt.Sprintf(format, args...))
+	logMu.Lock()
+	defer logMu.Unlock()
+	io.WriteString(logOut, line)
 }
 
 // Since is the time since start, rounded for printing.

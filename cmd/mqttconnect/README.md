@@ -50,7 +50,11 @@ go build -o build/mqttconnect ./cmd/mqttconnect
 | `-will-topic` | empty | Sets a Will on this topic |
 | `-will-payload`, `-will-qos`, `-will-retain` | empty, 0, false | The rest of the Will |
 
-Exit status: 0 on success, 1 when a step fails, 2 for invalid arguments.
+Exit status:
+- **0:** success.
+- **1:** a step after the connection failed: it was lost during `-hold`, or `disconnect` failed.
+- **2:** a setup error: invalid arguments, or the `tcp` or `connect` step failed (connection
+  refused or timed out, a TLS failure, a refused CONNACK, or with `-config`, every server failing).
 
 ## How to test
 

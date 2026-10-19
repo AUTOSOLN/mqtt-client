@@ -1,6 +1,9 @@
 package cli
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestPatternRoundTrip(t *testing.T) {
 	for name := range Patterns {
@@ -28,5 +31,25 @@ func TestPatternAlphaUnchanged(t *testing.T) {
 	b, _ := MakePattern("alpha", 28)
 	if string(b) != "abcdefghijklmnopqrstuvwxyzab" {
 		t.Fatalf("alpha = %q", b)
+	}
+}
+
+func TestPatternErrorOffset(t *testing.T) {
+	b, _ := MakePattern("binary", 10)
+	bad := append([]byte(nil), b...)
+	bad[3]++
+	for _, tc := range []struct {
+		b    []byte
+		size int
+		want int
+	}{
+		{bad, 10, 3},
+		{b[:7], 10, 7}, // missing bytes
+		{b, 8, 8},      // extra bytes
+	} {
+		var pe *PatternError
+		if err := VerifyPattern("binary", tc.b, tc.size); !errors.As(err, &pe) || pe.Offset != tc.want {
+			t.Errorf("%d bytes, size %d: %v, want offset %d", len(tc.b), tc.size, err, tc.want)
+		}
 	}
 }

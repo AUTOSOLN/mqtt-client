@@ -75,8 +75,8 @@ Application flags:
 | `-quiet` | `false` | Don't print every publication |
 
 Ctrl-C disconnects cleanly, so the broker doesn't publish the Will, and the app exits with 0. It
-exits with 1 if `Run` stops on a permanent error, such as bad credentials, and with 2 for invalid
-arguments.
+exits with 2 if `Run` stops on a permanent error, such as bad credentials, or for invalid
+arguments, as the other tools do when they cannot connect.
 
 ## How to test
 
