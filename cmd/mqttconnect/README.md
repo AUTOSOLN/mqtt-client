@@ -41,6 +41,7 @@ go build -o build/mqttconnect ./cmd/mqttconnect
 | `-hold` | `0` | How long to stay connected after CONNACK. Ctrl-C ends it early. |
 | `-reason` | `0` | DISCONNECT reason code (needs `-v 5`) |
 | `-repeat` | `1` | Run the steps this many times |
+| `-expect-session` | empty | `0` or `1`: fail (exit 1) unless the CONNACK Session Present flag is this, checked right after CONNACK, before `-hold`. `1` needs `-clean=false`. With `-config`, read [-expect-session and -config](#-expect-session-and--config). Needs the `connect` step. Without the flag, the flag is only printed. |
 | `-timeout` | `10s` | Timeout for each step |
 | `-debug` | `false` | Print the client's debug log to stderr |
 | `-cafile` | empty | PEM file of CA certificates to trust |
@@ -52,9 +53,28 @@ go build -o build/mqttconnect ./cmd/mqttconnect
 
 Exit status:
 - **0:** success.
-- **1:** a step after the connection failed: it was lost during `-hold`, or `disconnect` failed.
+- **1:** a step after the connection failed: `-expect-session` did not match, the connection was
+  lost during `-hold`, or `disconnect` failed.
 - **2:** a setup error: invalid arguments, or the `tcp` or `connect` step failed (connection
   refused or timed out, a TLS failure, a refused CONNACK, or with `-config`, every server failing).
+
+### -expect-session and -config
+
+`-expect-session` checks one CONNACK: the first one the broker accepts. With `-config`, keep in mind:
+
+- The first accepted CONNACK may come from any server in the file: the first that accepts, after
+  failing over past any that refuse or cannot be reached. A refused CONNACK carries no session and
+  is not checked. To assert a session on a particular node, use `-address` instead.
+- After a reconnect or failover, Session Present is **not** checked again. Each `OnConnect … session_present=…`
+  line in the log shows it, but a session lost on failover does not fail the run. To test that,
+  run the tool a second time against the other node with `-expect-session 1`.
+- `-expect-session 1` needs `-clean=false`, but that is checked only for `-address`. With
+  `-config`, each server can set `clean`, so a server with `clean: true` fails the check at run time
+  (exit 1), not as an invalid argument (exit 2).
+
+With `-repeat`, with or without `-config`, every run is a new connection and its first CONNACK is
+checked. So `-expect-session 1 -repeat 3` against a broker with no session fails the first run,
+which creates the session.
 
 ## How to test
 

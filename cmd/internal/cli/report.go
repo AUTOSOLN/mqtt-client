@@ -33,6 +33,8 @@ type Report struct {
 	// are null when no CONNACK arrived (the connection failed before one).
 	SessionPresent *bool `json:"session_present"`
 	ConnackReason  *int  `json:"connack_reason"`
+	// ExpectSession is -expect-session, null when not given.
+	ExpectSession *bool `json:"expect_session"`
 
 	Counts     ReportCounts `json:"counts"`
 	Verify     ReportVerify `json:"verify"`

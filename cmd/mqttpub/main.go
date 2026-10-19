@@ -57,6 +57,9 @@ type config struct {
 	quiet    bool
 	report   string
 
+	expectSession string
+	wantSession   *bool // parsed -expect-session
+
 	contentType   string
 	utf8          bool
 	responseTopic string
@@ -93,6 +96,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.correlation, "correlation", "", "Correlation Data property (MQTT 5)")
 	fs.UintVar(&cfg.expiry, "expiry", 0, "Message Expiry Interval in seconds (MQTT 5)")
 	fs.Var(&cfg.user, "user", "user property key=value (MQTT 5, repeatable)")
+	fs.StringVar(&cfg.expectSession, "expect-session", "", "fail unless the CONNACK Session Present flag is this: 0 or 1")
 	fs.StringVar(&cfg.report, "report", "", "write a JSON run report to this file on exit; - writes it to stdout and the log to stderr")
 	_ = fs.Parse(args)
 	rep := cli.NewReport("mqttpub", cfg.report, &cfg.conn, stdout, stderr)
@@ -100,6 +104,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	props, err := cfg.properties()
 	if err == nil {
 		err = cfg.checkSize()
+	}
+	if err == nil {
+		cfg.wantSession, err = cli.ParseExpectSession(cfg.expectSession, &cfg.conn)
+		rep.ExpectSession = cfg.wantSession
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, "mqttpub:", err)
@@ -232,6 +240,10 @@ func publish(ctx context.Context, cfg *config, props *mqttclient.Properties, rep
 		return cli.Setup(errors.New("-reason requires -v 5"))
 	}
 	if err := s.Start(ctx); err != nil {
+		return err
+	}
+	if err := s.CheckSessionPresent(cfg.wantSession); err != nil {
+		_ = s.Disconnect(0)
 		return err
 	}
 

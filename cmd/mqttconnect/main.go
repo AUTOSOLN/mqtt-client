@@ -46,6 +46,9 @@ type config struct {
 	hold   time.Duration
 	repeat int
 	reason uint
+
+	expectSession string
+	wantSession   *bool // parsed -expect-session
 }
 
 func main() {
@@ -59,6 +62,7 @@ func run() int {
 	flag.DurationVar(&cfg.hold, "hold", 0, "time to stay connected after CONNACK (Ctrl-C ends it early)")
 	flag.IntVar(&cfg.repeat, "repeat", 1, "run the steps this many times")
 	flag.UintVar(&cfg.reason, "reason", 0, "DISCONNECT reason code (MQTT 5 only)")
+	flag.StringVar(&cfg.expectSession, "expect-session", "", "fail unless the CONNACK Session Present flag is this: 0 or 1 (connect step)")
 	flag.Parse()
 
 	doTCP, doConnect, doDisconnect, err := parseSteps(cfg.steps)
@@ -67,6 +71,12 @@ func run() int {
 	}
 	if err == nil {
 		_, err = cfg.conn.Options() // check the connection flags before any step
+	}
+	if err == nil {
+		cfg.wantSession, err = cli.ParseExpectSession(cfg.expectSession, &cfg.conn)
+	}
+	if err == nil && doTCP && cfg.wantSession != nil {
+		err = errors.New(`-expect-session needs the "connect" step`)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mqttconnect:", err)
@@ -178,6 +188,10 @@ func connect(ctx context.Context, cfg *config, disconnect bool) error {
 		return cli.Setup(errors.New("-reason requires -v 5"))
 	}
 	if err := s.Start(ctx); err != nil {
+		return err
+	}
+	if err := s.CheckSessionPresent(cfg.wantSession); err != nil {
+		_ = s.Disconnect(byte(cfg.reason))
 		return err
 	}
 	if err := s.Hold(ctx, cfg.hold); err != nil {

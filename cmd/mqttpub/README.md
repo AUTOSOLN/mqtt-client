@@ -68,6 +68,7 @@ Publish flags:
 | `-correlation` | empty | Correlation Data property (needs `-v 5`) |
 | `-expiry` | `0` | Message Expiry Interval in seconds (needs `-v 5`) |
 | `-user` | | User property `key=value` (needs `-v 5`). Repeat the flag to add more than one. |
+| `-expect-session` | empty | `0` or `1`: fail (exit 1) unless the CONNACK Session Present flag is this, checked before publishing. `1` needs `-clean=false`. With `-config`, read [-expect-session and -config](#-expect-session-and--config). Without the flag, the flag is only printed. |
 | `-report` | empty | Write a JSON [run report](#run-report--report) to this file when the run ends; `-` writes it to stdout and moves the log to stderr |
 
 Exit status:
@@ -109,11 +110,28 @@ exits with status 2.
 | `ok`, `exit` | `ok` is `exit == 0`; `exit` is the process exit status. |
 | `exit_reason` | The error that ended the run, or a summary of a successful one. |
 | `server` | The broker of the latest CONNACK (with `-config`, the one failed over to), or before one, the first. `protocol` is as `-v`: `31`, `311` or `5`. |
-| `session_present`, `connack_reason` | From the latest CONNACK; `null` if none arrived. A refused CONNACK has its code here and `session_present` false. |
+| `session_present`, `connack_reason` | From the latest CONNACK; `null` if none arrived. A refused CONNACK has its code here and `session_present` false. With `-config`, this is the latest CONNACK, while `-expect-session` checks the first. |
+| `expect_session` | The `-expect-session` value as `true` or `false`; `null` without it. |
 | `counts` | `published`: accepted by `Client.Publish`. `acked`: completed without a failure reason code (for QoS 0, written, as QoS 0 has no acknowledgement). `refused`: completed with reason code 0x80 or above. `dropped`: QoS 0 lost while reconnecting. `received`: messages from the broker (`-listen`, resumed sessions). `verify_failed` is always 0 for `mqttpub`. |
 | `verify` | With `-size`, the `-pattern` and first payload size sent; otherwise `""` and -1. `first_bad_offset` is -1 and `first_bad_message` 0, since `mqttpub` checks nothing. |
 | `latency_ms` | QoS 1 and 2 only: milliseconds from `Client.Publish` returning to the PUBACK or PUBCOMP, as nearest-rank percentiles. Left out at QoS 0 and when the run fails. |
 | `duration_ms` | Wall time of the run. |
+
+### -expect-session and -config
+
+`-expect-session` checks one CONNACK: the first one the broker accepts. With `-config`, keep in mind:
+
+- The first accepted CONNACK may come from any server in the file: the first that accepts, after
+  failing over past any that refuse or cannot be reached. A refused CONNACK carries no session and
+  is not checked. To assert a session on a particular node, use `-address` instead.
+- After a reconnect or failover, Session Present is **not** checked again. Each `OnConnect … session_present=…`
+  line in the log shows it, but a session lost on failover does not fail the run. To test that,
+  run the tool a second time against the other node with `-expect-session 1`.
+- The [run report](#run-report--report)'s `session_present` and `server` are from the
+  *latest* CONNACK, so after a reconnect they can differ from the CONNACK that was checked.
+- `-expect-session 1` needs `-clean=false`, but that is checked only for `-address`. With
+  `-config`, each server can set `clean`, so a server with `clean: true` fails the check at run time
+  (exit 1), not as an invalid argument (exit 2).
 
 ### Several brokers (-config)
 

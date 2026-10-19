@@ -168,3 +168,18 @@ OK
 		t.Errorf("with -report file: exit %d stderr %q, log\n%s", code, stderr, strings.Join(got, "\n"))
 	}
 }
+
+func TestExpectSession(t *testing.T) {
+	b := &clitest.Broker{SessionPresent: true, Messages: [][]byte{[]byte("hi")}}
+	b.Start(t)
+	args := []string{"-address", b.Addr(), "-id", "s1", "-clean=false", "-t", "t/a", "-C", "1", "-W", "5s", "-report", "-"}
+	code, stdout, _ := runTool(t, append(args, "-expect-session", "1")...)
+	if r := decode(t, stdout); code != 0 || !r.OK || r.Counts.Received != 1 {
+		t.Errorf("-expect-session 1: exit %d %+v", code, r)
+	}
+	code, stdout, _ = runTool(t, append(args, "-expect-session", "0")...)
+	r := decode(t, stdout)
+	if code != 1 || r.OK || r.Counts.Received != 0 || r.SessionPresent == nil || !*r.SessionPresent {
+		t.Errorf("-expect-session 0: exit %d %+v", code, r)
+	}
+}
