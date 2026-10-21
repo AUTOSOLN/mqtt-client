@@ -1,6 +1,7 @@
 package mqttclient
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"fmt"
@@ -141,6 +142,13 @@ type Server struct {
 	// error. If nil, a default configuration is used. An empty ServerName
 	// is set from the Address host.
 	TLSConfig *tls.Config
+
+	// Dial, if set, opens the network connection to Address in place of a
+	// plain net.Dialer, for example to go through a proxy or to wrap the
+	// connection. It is called with network "tcp" and the context of the
+	// connection attempt. With TLS, the handshake runs over the connection
+	// it returns. (*net.Dialer).DialContext has this signature.
+	Dial func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
 // Handlers are the client callbacks. They are called one at a time, in
