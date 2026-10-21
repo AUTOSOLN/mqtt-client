@@ -364,9 +364,14 @@ func (c *Client) disconnect(ctx context.Context, cn *conn, reason byte, props *P
 }
 
 func (c *Client) dial(ctx context.Context, srv *serverState) (net.Conn, error) {
-	var d net.Dialer
-	if !srv.TLS {
-		return d.DialContext(ctx, "tcp", srv.Address)
+	dial := srv.Dial
+	if dial == nil {
+		var d net.Dialer
+		dial = d.DialContext
+	}
+	nc, err := dial(ctx, "tcp", srv.Address)
+	if err != nil || !srv.TLS {
+		return nc, err
 	}
 	cfg := &tls.Config{}
 	if srv.TLSConfig != nil {
@@ -375,8 +380,12 @@ func (c *Client) dial(ctx context.Context, srv *serverState) (net.Conn, error) {
 	if cfg.ServerName == "" {
 		cfg.ServerName = srv.host
 	}
-	td := tls.Dialer{NetDialer: &d, Config: cfg}
-	return td.DialContext(ctx, "tcp", srv.Address)
+	tc := tls.Client(nc, cfg)
+	if err := tc.HandshakeContext(ctx); err != nil {
+		_ = nc.Close()
+		return nil, err
+	}
+	return tc, nil
 }
 
 func copyMessage(m *Message) *Message {

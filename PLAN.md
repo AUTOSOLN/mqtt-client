@@ -218,6 +218,7 @@ type Server struct {          // everything that may differ from one server to t
     ReceiveMaximum    uint16        // default 20; always sent in MQTT 5 CONNECT, as mosquitto does
     MaxInflight       uint16        // default 20; outbound QoS 1/2 in flight unless the server sends Receive Maximum
     TLSConfig         *tls.Config
+    Dial              func(ctx context.Context, network, address string) (net.Conn, error) // default net.Dialer; TLS runs over it
 }
 
 type Handlers struct {
