@@ -49,6 +49,12 @@ type Message struct {
 	// Mid is the packet identifier of a received QoS 1 or 2 message. It is
 	// ignored by Publish and SetWill.
 	Mid uint16
+
+	// Dup is the DUP flag of a received message: the server marked it as a
+	// possible redelivery. For QoS 2 it is the flag of the last PUBLISH
+	// received before PUBREL. It is ignored by Publish and SetWill, which
+	// set DUP themselves on a resend.
+	Dup bool
 }
 
 // Options configures a Client. At least one server is required.

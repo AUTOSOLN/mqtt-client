@@ -337,8 +337,13 @@ func TestReceiveQoS0And1(t *testing.T) {
 	}
 	fc.send(0x32, 0x07, 0x00, 0x01, 'a', 0x12, 0x34, 'h', 'i')
 	fc.expect(0x40, 0x02, 0x12, 0x34)
-	if m := rec.message(t); m.Mid != 0x1234 || m.QoS != 1 {
+	if m := rec.message(t); m.Mid != 0x1234 || m.QoS != 1 || m.Dup {
 		t.Fatalf("message %+v", m)
+	}
+	fc.send(0x3A, 0x07, 0x00, 0x01, 'a', 0x12, 0x34, 'h', 'i') // resent: DUP set
+	fc.expect(0x40, 0x02, 0x12, 0x34)
+	if m := rec.message(t); m.Mid != 0x1234 || !m.Dup {
+		t.Fatalf("message %+v, want Dup", m)
 	}
 }
 
@@ -356,8 +361,8 @@ func TestReceiveQoS2(t *testing.T) {
 	fc.expect(0x50, 0x02, 0x00, 0x07)
 	fc.send(0x62, 0x02, 0x00, 0x07)
 	fc.expect(0x70, 0x02, 0x00, 0x07)
-	if m := rec.message(t); string(m.Payload) != "h2" || m.Mid != 7 {
-		t.Fatalf("message %+v", m)
+	if m := rec.message(t); string(m.Payload) != "h2" || m.Mid != 7 || !m.Dup {
+		t.Fatalf("message %+v, want the resend, with Dup", m)
 	}
 	rec.noMessage(t)
 

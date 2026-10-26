@@ -21,7 +21,7 @@ func (cn *conn) handlePublish(pk *packets.Packet) error {
 	if err := cn.checkInboundPublish(pk); err != nil {
 		return err
 	}
-	m := &Message{Topic: pk.TopicName, Payload: pk.Payload, QoS: qos, Retain: pk.FixedHeader.Retain, Mid: pk.PacketID}
+	m := &Message{Topic: pk.TopicName, Payload: pk.Payload, QoS: qos, Retain: pk.FixedHeader.Retain, Mid: pk.PacketID, Dup: pk.FixedHeader.Dup}
 	if cn.version == MQTT5 {
 		props := pk.Properties
 		m.Properties = &props
