@@ -28,6 +28,11 @@ go build -o build/mqttfuzz ./cmd/mqttfuzz
 `build/` is git-ignored. You can also run it directly:
 `go run ./cmd/mqttfuzz -f scenario.yaml`.
 
+The engine is the [`fuzz`](../../fuzz) package. Tests import it to run
+scenarios in-process (`fuzz.Load`/`fuzz.LoadFS`, then `(*Scenario).Run`) and
+get a JSON-serializable `fuzz.Result` with every packet sent and received.
+The example scenarios below are embedded in it as `fuzz.Scenarios`.
+
 ## Usage
 
 ```sh
@@ -47,7 +52,10 @@ mqttfuzz -f scenario.yaml [-address host:port] [-tls] [-v 31|311|5] [-set name=v
 | `-cafile`, `-cert`, `-key`, `-insecure`, `-servername` | — | TLS options (same meaning as `mqttconnect`) |
 
 Exit status: `0` all expectations held, `1` an expectation failed, `2` a setup
-or I/O error.
+or I/O error (`fuzz.ErrExpectation` and `fuzz.ErrSetup` in the package). The
+server closing the connection, or a write that times out because it stopped
+reading, counts as broker behaviour, not as an I/O error: after a close, later
+sending steps are skipped and later reads see the close.
 
 ## Scenario format
 
@@ -93,7 +101,7 @@ Packet steps encode and send one control packet:
 
 | Type | Key fields |
 |---|---|
-| `connect` | `client-id`, `clean`, `keepalive`, `username`, `password`, `protocol-name`, `will-topic`/`will-payload`/`will-qos`/`will-retain`, `properties` |
+| `connect` | `client-id`, `clean`, `keepalive`, `username`, `password`, `protocol-name`, `protocol-level`, `connect-flags`, `will-topic`/`will-payload`/`will-qos`/`will-retain`, `properties` |
 | `publish` | `topic`, `payload` or `payload-size`/`payload-pattern`, `qos`, `retain`, `dup`, `packet-id`, `properties` |
 | `subscribe` | `packet-id`, `filters`, `properties` |
 | `unsubscribe` | `packet-id`, `filters` (filter strings) |
@@ -106,12 +114,18 @@ Packet steps encode and send one control packet:
 `filters` is a list of strings, or of maps with `filter`, `qos`, `nolocal`,
 `rap`, `retain-handling`.
 
+On `connect`, `protocol-level` replaces only the protocol level byte (the rest
+of the packet is still encoded for the run's version), and `connect-flags`
+replaces the whole connect flags byte, reserved bit included. `username` and
+`password` default to the `fuzz.RunOptions` credentials when the step sets
+neither; `username: ""` sends none.
+
 Control steps drive the harness:
 
 | Type | Fields | Behaviour |
 |---|---|---|
-| `recv` | `timeout`, `count`, `expect`, `payload-pattern`, `payload-size` | Read `count` packets (default 1); log them. `expect` may be a packet type name, `close`, or `none` (silence). With `payload-pattern` or `payload-size`, every PUBLISH received must carry that pattern; `payload-size` 0 accepts any length. |
-| `expect-close` | `timeout` | Assert the server closes within the timeout, draining any packets it sends first. |
+| `recv` | `timeout`, `count`, `expect`, `reason`, `reasons`, `payload-pattern`, `payload-size` | Read `count` packets (default 1); log them. `expect` may be a packet type name, `close` (same as `expect-close`), or `none` (silence). `reason` is the reason code the first packet must carry (CONNACK, PUBACK/REC/REL/COMP, DISCONNECT, AUTH); `reasons` the list a SUBACK or UNSUBACK must carry, in order. With `payload-pattern` or `payload-size`, every PUBLISH received must carry that pattern; `payload-size` 0 accepts any length. |
+| `expect-close` | `timeout`, `reason`, `reason-optional` | Assert the server closes within the timeout, draining any packets it sends first. With `reason`, a DISCONNECT (or a refusing CONNACK) carrying that code must come before the close; with `reason-optional: true` as well, a bare close is also accepted. |
 | `sleep` | `duration` | Pause. |
 | `raw` | `hex` | Send arbitrary bytes (whitespace and `:` ignored) — for framing that no encoder would produce. |
 
@@ -119,9 +133,15 @@ Generated payloads: `payload-size: N` sends N bytes of `payload-pattern`
 (`ascii`, the default, `alpha`, `01` or `binary`; the same patterns as
 `mqttpub -pattern`), in place of `payload`.
 
-Every step also accepts `label` (shown in the log), `delay` (pause before the
-step), and `flags` (0–15: replaces the fixed-header low nibble after encoding,
-for reserved-bit and QoS-3 probes). MQTT 5 `properties` keys: `session-expiry`,
+Every step also accepts `label` (shown in the log and in the result), `delay`
+(pause before the step), and `flags` (0–15: replaces the fixed-header low
+nibble after encoding, for reserved-bit and QoS-3 probes). Packet and `raw`
+steps accept `repeat: N` to send N copies; a nonzero `packet-id` goes up by one
+each time.
+
+Reason codes are numbers, so hex works: `reason: 0x8D`, `reasons: [0x00, 0x8F]`.
+For bytes that are not valid UTF-8 (a topic or client ID probe), use YAML's
+`!!binary` tag with base64: `topic: !!binary ZTUv/w==` is `e5/` and `0xFF`. MQTT 5 `properties` keys: `session-expiry`,
 `receive-maximum`, `maximum-packet-size`, `topic-alias-maximum`, `topic-alias`,
 `payload-format`, `message-expiry`, `content-type`, `response-topic`,
 `subscription-identifier`, `reason-string`, `auth-method`, `auth-data`, and
@@ -129,7 +149,7 @@ for reserved-bit and QoS-3 probes). MQTT 5 `properties` keys: `session-expiry`,
 
 ## Example scenarios
 
-The `scenarios/` directory holds ready-to-run cases:
+[`fuzz/scenarios/`](../../fuzz/scenarios) holds ready-to-run cases:
 
 | File | Probes |
 |---|---|
@@ -141,10 +161,10 @@ The `scenarios/` directory holds ready-to-run cases:
 | `large-publish.yaml` | Sparkplug-shaped 3.1.1 QoS 0 PUBLISH of `size` bytes (default 256 KiB of `binary`), received back and checked byte for byte; fails on a drop, a close or a damaged payload |
 
 ```sh
-build/mqttfuzz -f cmd/mqttfuzz/scenarios/unsubscribe-without-subscribe.yaml
-build/mqttfuzz -f cmd/mqttfuzz/scenarios/disconnect-before-connect.yaml
-build/mqttfuzz -f cmd/mqttfuzz/scenarios/double-connect.yaml -set id=probe-$$
-build/mqttfuzz -f cmd/mqttfuzz/scenarios/large-publish.yaml -set size=1048576 -set pattern=ascii
+build/mqttfuzz -f fuzz/scenarios/unsubscribe-without-subscribe.yaml
+build/mqttfuzz -f fuzz/scenarios/disconnect-before-connect.yaml
+build/mqttfuzz -f fuzz/scenarios/double-connect.yaml -set id=probe-$$
+build/mqttfuzz -f fuzz/scenarios/large-publish.yaml -set size=1048576 -set pattern=ascii
 ```
 
 To find a broker's size limit, sweep `size` (the scenario's header has a loop).

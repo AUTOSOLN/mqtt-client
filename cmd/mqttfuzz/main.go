@@ -7,6 +7,9 @@
 // CONNECT, two CONNECTs, PUBLISH before CONNACK, reserved-bit and malformed
 // frames, and so on.
 //
+// It is a wrapper around the fuzz package, which tests can import to run
+// the same scenarios in-process.
+//
 // Usage:
 //
 //	mqttfuzz -f scenario.yaml [-address host:port] [-tls] [-v 5] [-set name=value ...]
@@ -21,6 +24,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -29,6 +33,7 @@ import (
 	"time"
 
 	"github.com/AUTOSOLN/mqtt-client/cmd/internal/cli"
+	"github.com/AUTOSOLN/mqtt-client/fuzz"
 )
 
 type setFlag map[string]string
@@ -66,68 +71,49 @@ func run() int {
 		return 2
 	}
 
-	sc, err := loadScenario(*file, sets)
+	sc, err := fuzz.Load(*file, sets)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "mqttfuzz:", err)
-		return 2
+		return setupErr(err)
 	}
 
-	ver := sc.Version
+	opts := fuzz.RunOptions{
+		Address:      *address,
+		RecvTimeout:  *recvTimeout,
+		DialTimeout:  *dialTimeout,
+		WriteTimeout: *writeTO,
+		Logf:         func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
+	}
 	if *version != "" {
-		ver = *version
+		if opts.Version, err = fuzz.ParseVersion(*version); err != nil {
+			return setupErr(err)
+		}
 	}
-	verByte, err := parseVersion(ver)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "mqttfuzz:", err)
-		return 2
-	}
-
-	addr := sc.Address
-	if *address != "" {
-		addr = *address
-	}
-	if addr == "" {
-		addr = "localhost:1883"
-	}
-	tlsOn := sc.TLS
 	flag.Visit(func(f *flag.Flag) {
 		if f.Name == "tls" {
-			tlsOn = *useTLS
+			sc.TLS = *useTLS // -tls=false turns off the scenario's tls: too
 		}
 	})
-
-	tc, err := tlsFlags.TLSConfig()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "mqttfuzz:", err)
-		return 2
+	if opts.TLSConfig, err = tlsFlags.TLSConfig(); err != nil {
+		return setupErr(err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	scheme := "tcp"
-	if tlsOn {
-		scheme = "tls"
-	}
-	logf("mqttfuzz: %s %s  v%s  %d step(s)", scheme, addr, versionName(verByte), len(sc.Steps))
-	rc, err := dial(ctx, addr, tlsOn, tc, *dialTimeout, verByte)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "mqttfuzz:", err)
-		return 2
-	}
-	defer rc.close()
-
-	r := &runner{rc: rc, recvTimeout: *recvTimeout, writeTO: *writeTO}
-	if err := r.run(ctx, sc, verByte); err != nil {
-		logf("ABORT: %v", err)
-		return 2
-	}
-	if r.failed {
-		logf("RESULT: expectations FAILED")
+	_, err = sc.Run(ctx, opts)
+	switch {
+	case errors.Is(err, fuzz.ErrExpectation):
 		return 1
+	case err != nil:
+		return 2 // Run logged it
 	}
-	logf("RESULT: OK")
 	return 0
+}
+
+// setupErr reports an error before the run, with exit status 2.
+func setupErr(err error) int {
+	fmt.Fprintln(os.Stderr, "mqttfuzz:", err)
+	return 2
 }
 
 // registerTLS adds only the TLS-related flags from cli.ConnFlags; the rest of
@@ -138,16 +124,4 @@ func registerTLS(f *cli.ConnFlags) {
 	flag.StringVar(&f.KeyFile, "key", "", "PEM client private key (TLS)")
 	flag.BoolVar(&f.Insecure, "insecure", false, "skip server certificate verification (TLS)")
 	flag.StringVar(&f.ServerName, "servername", "", "TLS server name, if different from the address host")
-}
-
-func versionName(v byte) string {
-	switch v {
-	case 3:
-		return "3.1"
-	case 4:
-		return "3.1.1"
-	case 5:
-		return "5"
-	}
-	return fmt.Sprint(v)
 }

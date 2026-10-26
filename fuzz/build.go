@@ -1,4 +1,4 @@
-package main
+package fuzz
 
 import (
 	"bytes"
@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/AUTOSOLN/mqtt-client/cmd/internal/cli"
+	"github.com/AUTOSOLN/mqtt-client/internal/pattern"
 	"github.com/wind-c/comqtt/v2/mqtt/packets"
 )
 
@@ -56,6 +56,7 @@ func encodeStep(s *Step, version byte) ([]byte, error) {
 		FixedHeader:     packets.FixedHeader{Type: typ},
 		ProtocolVersion: version,
 	}
+	reason := s.reasonCode()
 	// Reserved fixed-header bits default to what the spec requires. A step's
 	// `flags` value replaces the whole low nibble after encoding (see the
 	// stamp below), so the body is always built from a well-formed header
@@ -77,7 +78,7 @@ func encodeStep(s *Step, version byte) ([]byte, error) {
 		applyConnect(&pk, s, version)
 		err = pk.ConnectEncode(&buf)
 	case packets.Connack:
-		pk.ReasonCode = s.Reason
+		pk.ReasonCode = reason
 		err = pk.ConnackEncode(&buf)
 	case packets.Publish:
 		pk.TopicName = s.Topic
@@ -93,16 +94,16 @@ func encodeStep(s *Step, version byte) ([]byte, error) {
 		}
 		err = pk.PublishEncode(&buf)
 	case packets.Puback:
-		pk.PacketID, pk.ReasonCode = s.PacketID, s.Reason
+		pk.PacketID, pk.ReasonCode = s.PacketID, reason
 		err = pk.PubackEncode(&buf)
 	case packets.Pubrec:
-		pk.PacketID, pk.ReasonCode = s.PacketID, s.Reason
+		pk.PacketID, pk.ReasonCode = s.PacketID, reason
 		err = pk.PubrecEncode(&buf)
 	case packets.Pubrel:
-		pk.PacketID, pk.ReasonCode = s.PacketID, s.Reason
+		pk.PacketID, pk.ReasonCode = s.PacketID, reason
 		err = pk.PubrelEncode(&buf)
 	case packets.Pubcomp:
-		pk.PacketID, pk.ReasonCode = s.PacketID, s.Reason
+		pk.PacketID, pk.ReasonCode = s.PacketID, reason
 		err = pk.PubcompEncode(&buf)
 	case packets.Subscribe:
 		pk.PacketID = s.PacketID
@@ -125,10 +126,10 @@ func encodeStep(s *Step, version byte) ([]byte, error) {
 	case packets.Pingresp:
 		err = pk.PingrespEncode(&buf)
 	case packets.Disconnect:
-		pk.ReasonCode = s.Reason
+		pk.ReasonCode = reason
 		err = pk.DisconnectEncode(&buf)
 	case packets.Auth:
-		pk.ReasonCode = s.Reason
+		pk.ReasonCode = reason
 		err = pk.AuthEncode(&buf)
 	}
 	if err != nil {
@@ -136,12 +137,50 @@ func encodeStep(s *Step, version byte) ([]byte, error) {
 	}
 
 	b := buf.Bytes()
-	// -flags overrides the whole low nibble, including bits the typed
+	if typ == packets.Connect {
+		patchConnect(b, s)
+	}
+	// flags overrides the whole low nibble, including bits the typed
 	// encoders do not expose.
 	if s.Flags != nil && len(b) > 0 {
 		b[0] = (b[0] & 0xF0) | (*s.Flags & 0x0F)
 	}
 	return b, nil
+}
+
+// reasonCode is the reason code a packet step sends: Reason, or 0.
+func (s *Step) reasonCode() byte {
+	if s.Reason == nil {
+		return 0
+	}
+	return *s.Reason
+}
+
+// patchConnect applies protocol-level and connect-flags to an encoded
+// CONNECT: the level byte follows the protocol name, and the flags byte
+// follows the level.
+func patchConnect(b []byte, s *Step) {
+	if s.ProtocolLevel == nil && s.ConnectFlags == nil {
+		return
+	}
+	i := 1
+	for i < len(b) && b[i]&0x80 != 0 { // remaining length
+		i++
+	}
+	i++
+	if i+2 > len(b) {
+		return
+	}
+	level := i + 2 + (int(b[i])<<8 | int(b[i+1]))
+	if level+1 >= len(b) {
+		return
+	}
+	if s.ProtocolLevel != nil {
+		b[level] = *s.ProtocolLevel
+	}
+	if s.ConnectFlags != nil {
+		b[level+1] = *s.ConnectFlags
+	}
 }
 
 // publishPayload is the step's payload, or payload-size bytes of
@@ -153,11 +192,11 @@ func publishPayload(s *Step) ([]byte, error) {
 	if s.Payload != "" {
 		return nil, fmt.Errorf("give payload or payload-size/payload-pattern, not both")
 	}
-	pattern := s.PayloadPattern
-	if pattern == "" {
-		pattern = "ascii"
+	name := s.PayloadPattern
+	if name == "" {
+		name = "ascii"
 	}
-	return cli.MakePattern(pattern, s.PayloadSize)
+	return pattern.Make(name, s.PayloadSize)
 }
 
 func applyConnect(pk *packets.Packet, s *Step, version byte) {
@@ -172,13 +211,13 @@ func applyConnect(pk *packets.Packet, s *Step, version byte) {
 	pk.Connect.ClientIdentifier = s.ClientID
 	pk.Connect.Clean = s.Clean == nil || *s.Clean
 	pk.Connect.Keepalive = s.KeepAlive
-	if s.Username != "" {
+	if s.Username != nil && *s.Username != "" {
 		pk.Connect.UsernameFlag = true
-		pk.Connect.Username = []byte(s.Username)
+		pk.Connect.Username = []byte(*s.Username)
 	}
-	if s.Password != "" {
+	if s.Password != nil && *s.Password != "" {
 		pk.Connect.PasswordFlag = true
-		pk.Connect.Password = []byte(s.Password)
+		pk.Connect.Password = []byte(*s.Password)
 	}
 	if s.WillTopic != "" {
 		pk.Connect.WillFlag = true
@@ -207,7 +246,7 @@ func toSubscriptions(fs []Filter) packets.Subscriptions {
 // per filter when filters are given, otherwise the single Reason field.
 func reasonCodes(s *Step) []byte {
 	if len(s.Filters) == 0 {
-		return []byte{s.Reason}
+		return []byte{s.reasonCode()}
 	}
 	codes := make([]byte, len(s.Filters))
 	for i, f := range s.Filters {

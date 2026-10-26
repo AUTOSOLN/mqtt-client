@@ -38,6 +38,7 @@ import (
 
 	mqttclient "github.com/AUTOSOLN/mqtt-client"
 	"github.com/AUTOSOLN/mqtt-client/cmd/internal/cli"
+	"github.com/AUTOSOLN/mqtt-client/internal/pattern"
 )
 
 type config struct {
@@ -81,7 +82,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&cfg.message, "m", "hello {n}", "payload; {n} is replaced by the message number")
 	fs.IntVar(&cfg.size, "size", 0, "send a payload of this many bytes of -pattern instead of -m")
 	fs.IntVar(&cfg.sizeStep, "size-step", 0, "grow -size by this many bytes for each message after the first")
-	fs.StringVar(&cfg.pattern, "pattern", "alpha", "-size payload pattern: "+cli.PatternNames())
+	fs.StringVar(&cfg.pattern, "pattern", "alpha", "-size payload pattern: "+pattern.Names())
 	fs.UintVar(&cfg.qos, "q", 0, "QoS: 0, 1 or 2")
 	fs.BoolVar(&cfg.retain, "r", false, "retain flag")
 	fs.IntVar(&cfg.count, "n", 1, "number of messages (0 publishes nothing, for -listen)")
@@ -153,13 +154,13 @@ func (cfg *config) checkSize() error {
 	if cfg.size+(cfg.count-1)*cfg.sizeStep < 0 {
 		return errors.New("-size-step shrinks the payload below zero")
 	}
-	_, err := cli.MakePattern(cfg.pattern, 0)
+	_, err := pattern.Make(cfg.pattern, 0)
 	return err
 }
 
 func (cfg *config) payload(n int) []byte {
 	if cfg.size > 0 {
-		b, _ := cli.MakePattern(cfg.pattern, cfg.size+(n-1)*cfg.sizeStep)
+		b, _ := pattern.Make(cfg.pattern, cfg.size+(n-1)*cfg.sizeStep)
 		return b
 	}
 	return []byte(strings.ReplaceAll(cfg.message, "{n}", strconv.Itoa(n)))

@@ -1,8 +1,8 @@
-package main
+package fuzz
 
 import (
-	"os"
-	"path/filepath"
+	"io/fs"
+	"path"
 	"testing"
 
 	"github.com/wind-c/comqtt/v2/mqtt/packets"
@@ -77,7 +77,7 @@ func TestEncodeRawHex(t *testing.T) {
 // TestExampleScenariosParse makes sure the committed example scenarios stay
 // loadable as the schema evolves.
 func TestExampleScenariosParse(t *testing.T) {
-	matches, err := filepath.Glob("scenarios/*.yaml")
+	matches, err := fs.Glob(Scenarios, "scenarios/*.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,18 +85,17 @@ func TestExampleScenariosParse(t *testing.T) {
 		t.Fatal("no example scenarios found")
 	}
 	for _, m := range matches {
-		t.Run(filepath.Base(m), func(t *testing.T) {
-			sc, err := loadScenario(m, nil)
+		t.Run(path.Base(m), func(t *testing.T) {
+			sc, err := LoadFS(Scenarios, m, nil)
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
-			ver, err := parseVersion(sc.Version)
+			ver, err := ParseVersion(sc.Version)
 			if err != nil {
 				t.Fatalf("version: %v", err)
 			}
 			for i, s := range sc.Steps {
-				switch s.Type {
-				case "recv", "sleep", "expect-close":
+				if !s.sends() {
 					continue
 				}
 				if _, err := encodeStep(&s, ver); err != nil {
@@ -106,8 +105,6 @@ func TestExampleScenariosParse(t *testing.T) {
 		})
 	}
 }
-
-func TestMain(m *testing.M) { os.Exit(m.Run()) }
 
 func TestPublishPayloadPattern(t *testing.T) {
 	b, err := publishPayload(&Step{PayloadSize: 200})
