@@ -1,0 +1,18 @@
+# MQTT 5 only. PUBLISH with an empty topic name and no Topic Alias. That is a
+# Protocol Error [MQTT-3.3.2-1, 3.3.4]: DISCONNECT 0x82, then close.
+version: 5
+vars:
+  id: fuzz-${rand}
+steps:
+  - type: connect
+    client-id: "${id}"
+  - type: recv
+    expect: connack
+    reason: 0
+  - label: publish with an empty topic
+    type: publish
+    topic: ""
+    payload: no topic
+  - label: closed
+    type: expect-close
+    timeout: 5s

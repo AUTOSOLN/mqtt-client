@@ -1,0 +1,27 @@
+# A PUBLISH larger than the Maximum Packet Size the server announced in
+# CONNACK. It is a Protocol Error for the client [MQTT-3.1.2-24]: the server
+# closes, on MQTT 5 with DISCONNECT 0x95 Packet too large. Set size above
+# the server's limit; the default (16 MiB) exceeds most configured ones.
+version: 5
+vars:
+  id: fuzz-oversize-${rand}
+  topic: fuzz/oversize
+  size: 16777216
+steps:
+  - type: connect
+    client-id: "${id}"
+    keepalive: 60
+  - type: recv
+    expect: connack
+    reason: 0
+  - label: publish ${size} bytes
+    type: publish
+    topic: "${topic}"
+    payload-size: ${size}
+    qos: 1
+    packet-id: 1
+  - label: closed
+    type: expect-close
+    timeout: 20s
+    reason: 0x95
+    reason-optional: true

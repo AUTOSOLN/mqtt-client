@@ -1,0 +1,18 @@
+# MQTT 5 only. PUBLISH carrying property identifier 0x7F, which MQTT 5 does
+# not define: a Malformed Packet [MQTT-2.2.2], so DISCONNECT 0x81, then close.
+version: 5
+vars:
+  id: fuzz-unknown-${rand}
+steps:
+  - type: connect
+    client-id: "${id}"
+  - type: recv
+    expect: connack
+    reason: 0
+  # 30 09 | topic "e13" | properties (2): 7f 00 | payload "x"
+  - label: PUBLISH with property 0x7F
+    type: raw
+    hex: 30 09 00 03 65 31 33 02 7f 00 78
+  - label: closed
+    type: expect-close
+    timeout: 5s

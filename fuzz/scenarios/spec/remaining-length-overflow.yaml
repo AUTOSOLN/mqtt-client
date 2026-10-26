@@ -1,0 +1,18 @@
+# A PUBLISH whose Remaining Length has five bytes (four with the
+# continuation bit). A variable byte integer is at most four bytes
+# [MQTT-1.5.5], so this is a Malformed Packet: the server closes.
+version: 5
+vars:
+  id: fuzz-${rand}
+steps:
+  - type: connect
+    client-id: "${id}"
+  - type: recv
+    expect: connack
+    reason: 0
+  - label: remaining length ff ff ff ff 01
+    type: raw
+    hex: 30 ff ff ff ff 01
+  - label: closed
+    type: expect-close
+    timeout: 5s

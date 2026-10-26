@@ -167,7 +167,30 @@ build/mqttfuzz -f fuzz/scenarios/double-connect.yaml -set id=probe-$$
 build/mqttfuzz -f fuzz/scenarios/large-publish.yaml -set size=1048576 -set pattern=ascii
 ```
 
-To find a broker's size limit, sweep `size` (the scenario's header has a loop).
+To find a broker's size limit, sweep `size` in `large-publish.yaml` (its header
+has a loop).
+
+### Spec-level library
+
+[`fuzz/scenarios/spec/`](../../fuzz/scenarios/spec) holds one scenario per
+MQTT rule a broker must enforce. Each says in its header what the spec
+requires and where the server may choose (close with or without a reason
+code). Check the reason code in the result, or set `reason` on the close step,
+for the behaviour you want to pin.
+
+| File | Probes |
+|---|---|
+| `bad-credentials.yaml` | Refused user name/password: CONNACK 0x86 (`refusal` var; 0x04 on 3.1.1) |
+| `bad-protocol-name.yaml`, `bad-protocol-level.yaml` | `MQIsdp` at the run's level; level 6 |
+| `keepalive-timeout.yaml` | Silent client closed after 1.5 × `keepalive`; MQTT 5 DISCONNECT 0x8D |
+| `wildcard-publish-topic.yaml` | `+` or `#` in a PUBLISH topic (`topic` var) |
+| `empty-topic-no-alias.yaml` | MQTT 5 PUBLISH with an empty topic and no alias |
+| `invalid-utf8-topic.yaml`, `null-char-topic.yaml`, `invalid-utf8-client-id.yaml`, `invalid-utf8-username.yaml` | Ill-formed UTF-8 and U+0000 |
+| `remaining-length-overflow.yaml` | A five-byte Remaining Length |
+| `subscribe-no-filters.yaml` | SUBSCRIBE with no topic filters |
+| `reserved-bits-subscribe.yaml`, `-unsubscribe`, `-pubrel`, `-connect-header`, `-connect-flags` | Wrong fixed-header flags; the reserved CONNECT flag |
+| `duplicate-property.yaml`, `unknown-property.yaml` | MQTT 5 Content Type twice; property ID 0x7F |
+| `oversize-packet.yaml` | PUBLISH over the server's Maximum Packet Size (`size` var): DISCONNECT 0x95 |
 
 ## Reading the output
 

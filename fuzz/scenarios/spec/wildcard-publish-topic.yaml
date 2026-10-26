@@ -1,0 +1,20 @@
+# PUBLISH to a topic name with a wildcard. Topic names must not contain
+# wildcards [MQTT-3.3.2-2]; the server closes, on MQTT 5 possibly after
+# DISCONNECT.
+version: 5
+vars:
+  id: fuzz-${rand}
+  topic: fuzz/+/x
+steps:
+  - type: connect
+    client-id: "${id}"
+  - type: recv
+    expect: connack
+    reason: 0
+  - label: publish to ${topic}
+    type: publish
+    topic: "${topic}"
+    payload: wildcard
+  - label: closed
+    type: expect-close
+    timeout: 5s

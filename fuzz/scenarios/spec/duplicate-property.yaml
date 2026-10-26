@@ -1,0 +1,19 @@
+# MQTT 5 only. PUBLISH carrying Content Type twice. Only User Property and
+# Subscription Identifier may repeat; anything else is a Protocol Error
+# [MQTT-2.2.2-2]: DISCONNECT 0x82 (or 0x81), then close.
+version: 5
+vars:
+  id: fuzz-dup-${rand}
+steps:
+  - type: connect
+    client-id: "${id}"
+  - type: recv
+    expect: connack
+    reason: 0
+  # 30 0f | topic "e13" | properties (8): 03 "a", 03 "b" | payload "x"
+  - label: PUBLISH with Content Type twice
+    type: raw
+    hex: 30 0f 00 03 65 31 33 08 03 00 01 61 03 00 01 62 78
+  - label: closed
+    type: expect-close
+    timeout: 5s

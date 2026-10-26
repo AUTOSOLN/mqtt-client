@@ -1,0 +1,13 @@
+# CONNECT with user name 0xC3 0x28, which is not UTF-8 [MQTT-1.5.4-1].
+# The server refuses (CONNACK 0x80+ on MQTT 5) or just closes.
+version: 5
+vars:
+  id: fuzz-user-${rand}
+steps:
+  - type: connect
+    client-id: "${id}"
+    username: !!binary wyg=
+    password: whatever
+  - label: refused and closed
+    type: expect-close
+    timeout: 5s

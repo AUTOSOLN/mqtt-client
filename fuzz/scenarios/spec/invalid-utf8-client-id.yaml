@@ -1,0 +1,9 @@
+# CONNECT with client ID 0xC3 0x28, which is not UTF-8 [MQTT-1.5.4-1].
+# The server refuses (CONNACK 0x80+ on MQTT 5) or just closes.
+version: 5
+steps:
+  - type: connect
+    client-id: !!binary wyg=
+  - label: refused and closed
+    type: expect-close
+    timeout: 5s

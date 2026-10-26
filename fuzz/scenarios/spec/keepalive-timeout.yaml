@@ -1,0 +1,19 @@
+# A client that goes silent after CONNECT must be closed once
+# one and a half times its keepalive passes with no packet from it
+# [MQTT-3.1.2-22] ([MQTT-3.1.2-24] in MQTT 5). On MQTT 5 the server should send
+# DISCONNECT 0x8D (Keep Alive timeout) first. The result has both: the close
+# step's CloseReason, and its Start and Elapsed for the timing.
+version: 5
+vars:
+  id: fuzz-${rand}
+  keepalive: 5
+steps:
+  - type: connect
+    client-id: "${id}"
+    keepalive: ${keepalive}
+  - type: recv
+    expect: connack
+    reason: 0
+  - label: silent until closed
+    type: expect-close
+    timeout: 20s
