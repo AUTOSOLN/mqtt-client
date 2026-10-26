@@ -1,0 +1,14 @@
+# CONNECT with protocol name "MQIsdp" (MQTT 3.1's) at the run's level.
+# The server may refuse with a CONNACK (MQTT 5 suggests 0x84) or close without
+# one [MQTT-3.1.2-1]; either way the connection must close. The close
+# step's CloseReason has the refusal code, if one came.
+version: 5
+vars:
+  id: fuzz-name-${rand}
+steps:
+  - type: connect
+    client-id: "${id}"
+    protocol-name: MQIsdp
+  - label: refused and closed
+    type: expect-close
+    timeout: 5s

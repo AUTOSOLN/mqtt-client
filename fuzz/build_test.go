@@ -2,7 +2,7 @@ package fuzz
 
 import (
 	"io/fs"
-	"path"
+	"strings"
 	"testing"
 
 	"github.com/wind-c/comqtt/v2/mqtt/packets"
@@ -81,11 +81,16 @@ func TestExampleScenariosParse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	spec, err := fs.Glob(Scenarios, "scenarios/spec/*.yaml")
+	if err != nil || len(spec) == 0 {
+		t.Fatalf("spec scenarios: %v %v", spec, err)
+	}
+	matches = append(matches, spec...)
 	if len(matches) == 0 {
 		t.Fatal("no example scenarios found")
 	}
 	for _, m := range matches {
-		t.Run(path.Base(m), func(t *testing.T) {
+		t.Run(strings.TrimPrefix(m, "scenarios/"), func(t *testing.T) {
 			sc, err := LoadFS(Scenarios, m, nil)
 			if err != nil {
 				t.Fatalf("load: %v", err)

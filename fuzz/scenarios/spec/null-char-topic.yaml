@@ -1,0 +1,18 @@
+# PUBLISH topic containing U+0000, which a UTF-8 string must not
+# [MQTT-1.5.4-2]: a Malformed Packet, so the server closes.
+version: 5
+vars:
+  id: fuzz-null-${rand}
+steps:
+  - type: connect
+    client-id: "${id}"
+  - type: recv
+    expect: connack
+    reason: 0
+  - label: publish to a topic with U+0000
+    type: publish
+    topic: "e5/\0/x"
+    payload: bad topic
+  - label: closed
+    type: expect-close
+    timeout: 5s

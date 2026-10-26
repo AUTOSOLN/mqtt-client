@@ -1,0 +1,14 @@
+# CONNECT with the reserved connect flag (bit 0) set [MQTT-3.1.2-3]: a
+# Malformed Packet, so the server closes without accepting it. 0xC3 is user
+# name + password + clean start + the reserved bit.
+version: 5
+vars:
+  id: fuzz-reserved-${rand}
+steps:
+  - label: CONNECT with the reserved flag set
+    type: connect
+    client-id: "${id}"
+    connect-flags: 0xC3
+  - label: refused and closed
+    type: expect-close
+    timeout: 5s

@@ -1,0 +1,13 @@
+# CONNECT with fixed-header flags 0001 instead of 0000 [MQTT-2.1.3-1]: a
+# Malformed Packet, so the server closes without accepting it.
+version: 5
+vars:
+  id: fuzz-connect-${rand}
+steps:
+  - label: CONNECT with fixed-header flags 0001
+    type: connect
+    client-id: "${id}"
+    flags: 1
+  - label: refused and closed
+    type: expect-close
+    timeout: 5s

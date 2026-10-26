@@ -31,6 +31,10 @@ builds:
     id: mqttfuzz
     main: ./cmd/mqttfuzz
     binary: mqttfuzz
+  - <<: *defaults
+    id: sparkverify
+    main: ./cmd/sparkverify
+    binary: sparkverify
 
 archives:
   - formats: [tar.gz]
@@ -53,8 +57,13 @@ archives:
         dst: README-mqttpub.md
       - src: cmd/mqttsub/README.md
         dst: README-mqttsub.md
+      - src: cmd/sparkverify/README.md
+        dst: README-sparkverify.md
       - src: fuzz/scenarios/*.yaml
         dst: scenarios
+        strip_parent: true
+      - src: fuzz/scenarios/spec/*.yaml
+        dst: scenarios/spec
         strip_parent: true
 
 checksum:

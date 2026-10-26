@@ -36,6 +36,11 @@ func (cn *conn) handlePublish(pk *packets.Packet) error {
 		if err := cn.checkReceiveQuota(); err != nil {
 			return err
 		}
+		if c.opts.ManualAck {
+			cn.holdAck(m)
+			c.postMessage(m)
+			return nil
+		}
 		ack := newAck(cn.version, packets.Puback, m.Mid, 0)
 		if err := cn.write(&ack, time.Time{}); err != nil {
 			return err
@@ -109,6 +114,14 @@ func (cn *conn) handlePubrel(pk *packets.Packet) error {
 	m, ok := s.in[pk.PacketID]
 	if ok {
 		delete(s.in, pk.PacketID)
+		if cn.c.opts.ManualAck {
+			// The quota is returned, and PUBCOMP sent, by Ack.
+			m.ack = &pendingAck{mid: m.Mid, qos: 2, cn: cn}
+			s.pending = append(s.pending, m.ack)
+			s.mu.Unlock()
+			cn.c.postMessage(m)
+			return nil
+		}
 		if s.recvQuota < s.recvMax {
 			s.recvQuota++
 		}

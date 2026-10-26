@@ -66,6 +66,19 @@ type session struct {
 
 	recvMax   uint16 // Receive Maximum sent in CONNECT (MQTT 5); 0 means no limit
 	recvQuota uint16
+
+	// pending holds delivered messages waiting for Client.Ack
+	// (Options.ManualAck), in delivery order.
+	pending []*pendingAck
+}
+
+// pendingAck is a delivered QoS 1 or 2 message whose PUBACK or PUBCOMP waits
+// for Client.Ack.
+type pendingAck struct {
+	mid   uint16
+	qos   byte
+	cn    *conn // the connection it arrived on
+	acked bool
 }
 
 func (s *session) init() {
@@ -156,6 +169,9 @@ func (s *session) connected(cn *conn, sendMax uint16, props *Properties, session
 	if !sessionPresent {
 		clear(s.in)
 	}
+	// Messages delivered on an earlier connection can no longer be
+	// acknowledged: the server resends what it still holds.
+	s.pending = nil
 	s.recvQuota = s.recvMax - min(s.recvMax, uint16(len(s.in)))
 	cn.active.Store(true)
 	return s.release(time.Time{})

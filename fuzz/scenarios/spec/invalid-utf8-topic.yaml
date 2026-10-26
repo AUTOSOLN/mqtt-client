@@ -1,0 +1,18 @@
+# PUBLISH topic "e5/" + 0xFF, which is not UTF-8 [MQTT-1.5.4-1]: a
+# Malformed Packet, so the server closes (MQTT 5: DISCONNECT 0x81 first).
+version: 5
+vars:
+  id: fuzz-topic-${rand}
+steps:
+  - type: connect
+    client-id: "${id}"
+  - type: recv
+    expect: connack
+    reason: 0
+  - label: publish to an invalid UTF-8 topic
+    type: publish
+    topic: !!binary ZTUv/w==
+    payload: bad topic
+  - label: closed
+    type: expect-close
+    timeout: 5s

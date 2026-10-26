@@ -1,0 +1,18 @@
+# SUBSCRIBE with no topic filters. The payload must hold at least one
+# [MQTT-3.8.3-3]; MQTT 5 calls it a Protocol Error. The server closes.
+version: 5
+vars:
+  id: fuzz-${rand}
+steps:
+  - type: connect
+    client-id: "${id}"
+  - type: recv
+    expect: connack
+    reason: 0
+  - label: SUBSCRIBE without filters
+    type: subscribe
+    packet-id: 1
+    filters: []
+  - label: closed
+    type: expect-close
+    timeout: 5s
