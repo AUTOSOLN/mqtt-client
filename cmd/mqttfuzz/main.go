@@ -12,7 +12,7 @@
 //
 // Usage:
 //
-//	mqttfuzz -f scenario.yaml [-address host:port] [-tls] [-v 5] [-set name=value ...]
+//	mqttfuzz -f scenario.yaml [-address host:port] [-tls] [-v 5] [-u user] [-P pass] [-set name=value ...]
 //
 // Tokens: write ${name} anywhere in the scenario. Values come from the
 // scenario's vars:, overridden by -set name=value. Built-ins: ${rand} (a
@@ -59,6 +59,8 @@ func run() int {
 		recvTimeout = flag.Duration("recv-timeout", 2*time.Second, "default wait for a recv/expect-close step")
 		dialTimeout = flag.Duration("dial-timeout", 10*time.Second, "connection (and TLS handshake) timeout")
 		writeTO     = flag.Duration("write-timeout", 5*time.Second, "per-packet write timeout")
+		username    = flag.String("u", "", "username for CONNECT steps that set neither username: nor password:")
+		password    = flag.String("P", "", "password for CONNECT steps that set neither username: nor password:")
 		sets        = setFlag{}
 	)
 	flag.Var(sets, "set", "token override name=value (repeatable)")
@@ -81,6 +83,8 @@ func run() int {
 		RecvTimeout:  *recvTimeout,
 		DialTimeout:  *dialTimeout,
 		WriteTimeout: *writeTO,
+		Username:     *username,
+		Password:     *password,
 		Logf:         func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
 	}
 	if *version != "" {

@@ -36,7 +36,7 @@ The example scenarios below are embedded in it as `fuzz.Scenarios`.
 ## Usage
 
 ```sh
-mqttfuzz -f scenario.yaml [-address host:port] [-tls] [-v 31|311|5] [-set name=value ...]
+mqttfuzz -f scenario.yaml [-address host:port] [-tls] [-v 31|311|5] [-u user] [-P pass] [-set name=value ...]
 ```
 
 | Flag | Default | Meaning |
@@ -45,6 +45,7 @@ mqttfuzz -f scenario.yaml [-address host:port] [-tls] [-v 31|311|5] [-set name=v
 | `-address` | scenario's `address:`, else `localhost:1883` | Broker address as `host:port` (IP address or hostname; the port is required) |
 | `-tls` | scenario's `tls:`, else `false` | Connect with TLS. Never inferred from the port |
 | `-v` | scenario's `version:`, else `311` | Protocol version: `31`, `311` or `5` |
+| `-u`, `-P` | — | Username and password sent by every `connect` step that sets neither `username:` nor `password:` |
 | `-set name=value` | — | Override a token (repeatable) |
 | `-recv-timeout` | `2s` | Default wait for a `recv` / `expect-close` step |
 | `-dial-timeout` | `10s` | Connection and TLS handshake timeout |
