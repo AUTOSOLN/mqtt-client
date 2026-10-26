@@ -55,6 +55,8 @@ type Message struct {
 	// received before PUBREL. It is ignored by Publish and SetWill, which
 	// set DUP themselves on a resend.
 	Dup bool
+
+	ack *pendingAck // set on a received QoS 1/2 message with Options.ManualAck
 }
 
 // Options configures a Client. At least one server is required.
@@ -76,6 +78,14 @@ type Options struct {
 	// goes to the server as given. Only the 65535-byte limit remains. It is
 	// meant for testing how a server handles invalid topics.
 	NoTopicCheck bool
+
+	// ManualAck holds back the acknowledgement of received QoS 1 and 2
+	// messages (PUBACK, or PUBCOMP) until the application calls Client.Ack.
+	// A message not yet acknowledged keeps its slot in the Receive Maximum,
+	// so the server sends no more than that many unacknowledged messages.
+	// Acknowledgements go out in the order the messages were delivered,
+	// whatever order Ack is called in [MQTT-4.6.0-2].
+	ManualAck bool
 }
 
 // Server is one broker in Options.Servers and the settings used to connect
@@ -185,7 +195,8 @@ type Handlers struct {
 
 	// OnMessage is called for every message received from the server: QoS 0
 	// and 1 on arrival (after PUBACK is sent), QoS 2 when PUBREL arrives
-	// (after PUBCOMP is sent). The handler owns m.
+	// (after PUBCOMP is sent). With Options.ManualAck, PUBACK and PUBCOMP
+	// wait for Client.Ack instead. The handler owns m.
 	OnMessage func(c *Client, m *Message)
 
 	// OnPublish is called when a published message is complete: QoS 0 once

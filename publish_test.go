@@ -22,6 +22,12 @@ type publishEvent struct {
 
 func newPubClient(t *testing.T, b *fakeBroker, opts Server) (*Client, *pubRecorder) {
 	t.Helper()
+	return newPubClientWith(t, b, opts, Options{})
+}
+
+// newPubClientWith is newPubClient with client-wide options from o.
+func newPubClientWith(t *testing.T, b *fakeBroker, opts Server, o Options) (*Client, *pubRecorder) {
+	t.Helper()
 	opts.Address = b.address()
 	if opts.ClientID == "" {
 		opts.ClientID = "c"
@@ -32,7 +38,8 @@ func newPubClient(t *testing.T, b *fakeBroker, opts Server) (*Client, *pubRecord
 		messages:  make(chan *Message, 10),
 		published: make(chan publishEvent, 10),
 	}
-	c, err := New(single(opts), Handlers{
+	o.Servers = []Server{opts}
+	c, err := New(o, Handlers{
 		OnConnect:    func(_ *Client, a ConnAck) { rec.connects <- a },
 		OnDisconnect: func(_ *Client, e DisconnectEvent) { rec.disconnects <- e },
 		OnMessage:    func(_ *Client, m *Message) { rec.messages <- m },
