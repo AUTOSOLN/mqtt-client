@@ -36,7 +36,7 @@ The example scenarios below are embedded in it as `fuzz.Scenarios`.
 ## Usage
 
 ```sh
-mqttfuzz -f scenario.yaml [-address host:port] [-tls] [-v 31|311|5] [-set name=value ...]
+mqttfuzz -f scenario.yaml [-address host:port] [-tls] [-v 31|311|5] [-u user] [-P pass] [-set name=value ...]
 ```
 
 | Flag | Default | Meaning |
@@ -45,6 +45,7 @@ mqttfuzz -f scenario.yaml [-address host:port] [-tls] [-v 31|311|5] [-set name=v
 | `-address` | scenario's `address:`, else `localhost:1883` | Broker address as `host:port` (IP address or hostname; the port is required) |
 | `-tls` | scenario's `tls:`, else `false` | Connect with TLS. Never inferred from the port |
 | `-v` | scenario's `version:`, else `311` | Protocol version: `31`, `311` or `5` |
+| `-u`, `-P` | — | Username and password sent by every `connect` step that sets neither `username:` nor `password:` |
 | `-set name=value` | — | Override a token (repeatable) |
 | `-recv-timeout` | `2s` | Default wait for a `recv` / `expect-close` step |
 | `-dial-timeout` | `10s` | Connection and TLS handshake timeout |
@@ -161,14 +162,36 @@ For bytes that are not valid UTF-8 (a topic or client ID probe), use YAML's
 | `large-publish.yaml` | Sparkplug-shaped 3.1.1 QoS 0 PUBLISH of `size` bytes (default 256 KiB of `binary`), received back and checked byte for byte; fails on a drop, a close or a damaged payload |
 
 ```sh
+# Against localhost:1883, with each scenario's own version
 build/mqttfuzz -f fuzz/scenarios/unsubscribe-without-subscribe.yaml
 build/mqttfuzz -f fuzz/scenarios/disconnect-before-connect.yaml
+build/mqttfuzz -f fuzz/scenarios/publish-before-connect.yaml
+build/mqttfuzz -f fuzz/scenarios/malformed-reserved-bits.yaml
+
+# Pick the client ID; run the 3.1.1 case as MQTT 5 instead
 build/mqttfuzz -f fuzz/scenarios/double-connect.yaml -set id=probe-$$
-build/mqttfuzz -f fuzz/scenarios/large-publish.yaml -set size=1048576 -set pattern=ascii
+build/mqttfuzz -f fuzz/scenarios/publish-before-connect.yaml -v 5 -set topic=fuzz/early/v5
+
+# A remote broker that requires a login, over TLS
+build/mqttfuzz -f fuzz/scenarios/unsubscribe-without-subscribe.yaml \
+  -address broker.example.com:8883 -tls -cafile ca.pem -u fuzzer -P secret
+
+# 1 MiB of printable ASCII on a custom Sparkplug group and node
+build/mqttfuzz -f fuzz/scenarios/large-publish.yaml \
+  -set size=1048576 -set pattern=ascii -set group=plant1 -set node=edge-07
 ```
 
 To find a broker's size limit, sweep `size` in `large-publish.yaml` (its header
 has a loop).
+
+To run every example and list which failed:
+
+```sh
+for f in fuzz/scenarios/*.yaml; do
+  build/mqttfuzz -f "$f" -address localhost:1883 >/dev/null 2>&1 \
+    && echo "ok    $f" || echo "FAIL  $f (exit $?)"
+done
+```
 
 ### Spec-level library
 
@@ -191,6 +214,55 @@ for the behaviour you want to pin.
 | `reserved-bits-subscribe.yaml`, `-unsubscribe`, `-pubrel`, `-connect-header`, `-connect-flags` | Wrong fixed-header flags; the reserved CONNECT flag |
 | `duplicate-property.yaml`, `unknown-property.yaml` | MQTT 5 Content Type twice; property ID 0x7F |
 | `oversize-packet.yaml` | PUBLISH over the server's Maximum Packet Size (`size` var): DISCONNECT 0x95 |
+
+All default to MQTT 5. Every one except `duplicate-property.yaml`,
+`empty-topic-no-alias.yaml` and `unknown-property.yaml` (MQTT 5 only) can also
+run with `-v 311`.
+
+```sh
+# Run one probe as MQTT 5, then as 3.1.1
+build/mqttfuzz -f fuzz/scenarios/spec/remaining-length-overflow.yaml
+build/mqttfuzz -f fuzz/scenarios/spec/remaining-length-overflow.yaml -v 311
+
+# Bad credentials: the scenario sets username and password itself, so use
+# -set rather than -u/-P; 3.1.1 refuses with 0x04 instead of 0x86
+build/mqttfuzz -f fuzz/scenarios/spec/bad-credentials.yaml -set username=alice
+build/mqttfuzz -f fuzz/scenarios/spec/bad-credentials.yaml -v 311 -set refusal=0x04
+# A broker that answers 0x87 Not authorized instead
+build/mqttfuzz -f fuzz/scenarios/spec/bad-credentials.yaml -set refusal=0x87
+
+# Keepalive: a 10 s keepalive must close by 15 s (the close step waits 20 s,
+# so keep keepalive at 13 or less)
+build/mqttfuzz -f fuzz/scenarios/spec/keepalive-timeout.yaml -set keepalive=10
+
+# Wildcards: '+' (the default) and '#'
+build/mqttfuzz -f fuzz/scenarios/spec/wildcard-publish-topic.yaml
+build/mqttfuzz -f fuzz/scenarios/spec/wildcard-publish-topic.yaml -set 'topic=fuzz/#'
+
+# Oversize: a broker with a 1 MiB Maximum Packet Size
+build/mqttfuzz -f fuzz/scenarios/spec/oversize-packet.yaml -set size=1048577
+
+# A broker that requires a login for the probes that get past CONNECT
+build/mqttfuzz -f fuzz/scenarios/spec/reserved-bits-subscribe.yaml -u fuzzer -P secret
+```
+
+To run the whole library, at both versions where it applies:
+
+```sh
+for f in fuzz/scenarios/spec/*.yaml; do
+  for v in 5 311; do
+    case "$v:$(basename "$f")" in
+      311:duplicate-property.yaml|311:empty-topic-no-alias.yaml|311:unknown-property.yaml) continue ;;
+    esac
+    case "$v:$(basename "$f")" in
+      311:bad-credentials.yaml) extra="-set refusal=0x04" ;;
+      *) extra="" ;;
+    esac
+    build/mqttfuzz -f "$f" -v "$v" $extra >/dev/null 2>&1 \
+      && echo "ok    v$v $f" || echo "FAIL  v$v $f (exit $?)"
+  done
+done
+```
 
 ## Reading the output
 
