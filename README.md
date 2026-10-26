@@ -63,6 +63,24 @@ For manual tests against a real broker, see [cmd/mqttconnect](cmd/mqttconnect)
 [cmd/interactiveclient](cmd/interactiveclient) (a long-running app on `Run`
 that reconnects by itself).
 
+To probe how a broker handles packets a client should never send, see
+[cmd/mqttfuzz](cmd/mqttfuzz). Its engine is the [fuzz](fuzz) package, so a
+test can run the same YAML scenarios in-process:
+
+```go
+sc, err := fuzz.LoadFS(fuzz.Scenarios, "scenarios/double-connect.yaml", nil)
+if err != nil {
+	t.Fatal(err)
+}
+res, err := sc.Run(ctx, fuzz.RunOptions{Address: addr, Username: "u", Password: "p", Logf: t.Logf})
+switch {
+case errors.Is(err, fuzz.ErrSetup): // the run could not happen (broker unreachable, ...)
+	t.Fatal(err)
+case errors.Is(err, fuzz.ErrExpectation): // the broker did not behave as the scenario asserts
+	t.Errorf("%v\n%s", err, res.JSON())
+}
+```
+
 ## Using it
 
 ```

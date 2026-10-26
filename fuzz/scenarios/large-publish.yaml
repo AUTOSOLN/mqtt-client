@@ -8,7 +8,7 @@
 # Find the limit by sweeping the size:
 #
 #   for kb in 64 128 256 512 1024 2048; do
-#     build/mqttfuzz -f cmd/mqttfuzz/scenarios/large-publish.yaml -set size=$((kb*1024)) >/dev/null 2>&1 \
+#     build/mqttfuzz -f fuzz/scenarios/large-publish.yaml -set size=$((kb*1024)) >/dev/null 2>&1 \
 #       && echo "$kb KiB ok" || echo "$kb KiB FAILED"
 #   done
 version: 311

@@ -1,4 +1,4 @@
-package main
+package fuzz
 
 import (
 	"bufio"
@@ -21,9 +21,13 @@ type rawConn struct {
 	version byte
 }
 
-// dial opens a TCP connection to addr (host:port), with a TLS handshake when
-// useTLS is set. tc may be nil.
-func dial(ctx context.Context, addr string, useTLS bool, tc *tls.Config, timeout time.Duration, version byte) (*rawConn, error) {
+// dialFunc opens a network connection, as net.Dialer.DialContext does.
+type dialFunc func(ctx context.Context, network, address string) (net.Conn, error)
+
+// dial opens a TCP connection to addr (host:port) with dialFn, or a
+// net.Dialer when it is nil, then a TLS handshake when useTLS is set. tc
+// may be nil; it is not modified.
+func dial(ctx context.Context, dialFn dialFunc, addr string, useTLS bool, tc *tls.Config, timeout time.Duration, version byte) (*rawConn, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err // already names the address
@@ -32,8 +36,11 @@ func dial(ctx context.Context, addr string, useTLS bool, tc *tls.Config, timeout
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var d net.Dialer
-	nc, err := d.DialContext(ctx, "tcp", addr)
+	if dialFn == nil {
+		var d net.Dialer
+		dialFn = d.DialContext
+	}
+	nc, err := dialFn(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("tcp dial %s: %w", addr, err)
 	}
@@ -41,6 +48,7 @@ func dial(ctx context.Context, addr string, useTLS bool, tc *tls.Config, timeout
 		if tc == nil {
 			tc = &tls.Config{}
 		}
+		tc = tc.Clone()
 		if tc.ServerName == "" {
 			tc.ServerName = host
 		}
@@ -63,27 +71,11 @@ func (rc *rawConn) writeBytes(b []byte, timeout time.Duration) error {
 	return err
 }
 
-// inPacket is a summarized inbound packet for logging and expectations.
-type inPacket struct {
-	Type      byte
-	Name      string
-	Flags     byte
-	Raw       []byte // the whole frame, header included
-	PacketID  uint16
-	Reason    byte
-	ReasonSet bool
-	Reasons   []byte // SUBACK/UNSUBACK per-filter codes
-	Topic     string
-	Payload   []byte // PUBLISH
-	Session   bool
-	Err       error // decode error, if the body did not parse
-}
-
 // readPacket reads one whole control packet within timeout. A read past the
 // deadline returns a timeout error; a closed connection returns io.EOF (or
 // io.ErrUnexpectedEOF mid-frame). The frame is decoded best-effort: a body
 // that fails to parse still yields the type, flags and raw bytes.
-func (rc *rawConn) readPacket(timeout time.Duration) (*inPacket, error) {
+func (rc *rawConn) readPacket(timeout time.Duration) (*Packet, error) {
 	_ = rc.nc.SetReadDeadline(time.Now().Add(timeout))
 
 	hb, err := rc.br.ReadByte()
@@ -105,31 +97,40 @@ func (rc *rawConn) readPacket(timeout time.Duration) (*inPacket, error) {
 	raw := append([]byte{hb}, encodeLen(n)...)
 	raw = append(raw, body...)
 
-	in := &inPacket{
-		Type:  hb >> 4,
+	typ := hb >> 4
+	in := &Packet{
+		Type:  packets.PacketNames[typ],
 		Flags: hb & 0x0F,
+		Size:  len(raw),
 		Raw:   raw,
+		typ:   typ,
 	}
-	in.Name = packets.PacketNames[in.Type]
-	if in.Name == "" {
-		in.Name = fmt.Sprintf("type%d", in.Type)
+	if in.Type == "" {
+		in.Type = fmt.Sprintf("type%d", typ)
 	}
 
 	pk := packets.Packet{
-		FixedHeader:     packets.FixedHeader{Type: in.Type, Remaining: n},
+		FixedHeader:     packets.FixedHeader{Type: typ, Remaining: n},
 		ProtocolVersion: rc.version,
 	}
-	in.Err = decodeInbound(&pk, body)
+	if err := decodeInbound(&pk, body); err != nil {
+		in.DecodeError = err.Error()
+	}
 	in.PacketID = pk.PacketID
 	in.Topic = pk.TopicName
 	in.Payload = pk.Payload
-	in.Session = pk.SessionPresent
-	switch in.Type {
+	in.PayloadSize = len(pk.Payload)
+	in.SessionPresent = pk.SessionPresent
+	switch typ {
 	case packets.Connack, packets.Disconnect, packets.Auth,
 		packets.Puback, packets.Pubrec, packets.Pubrel, packets.Pubcomp:
-		in.Reason, in.ReasonSet = pk.ReasonCode, true
+		code := pk.ReasonCode
+		in.ReasonCode = &code
 	case packets.Suback, packets.Unsuback:
-		in.Reasons = pk.ReasonCodes
+		in.ReasonCodes = pk.ReasonCodes
+	}
+	if rc.version == 5 {
+		in.Properties = summarize(&pk.Properties)
 	}
 	return in, nil
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/AUTOSOLN/mqtt-client/cmd/internal/cli"
 	"github.com/AUTOSOLN/mqtt-client/cmd/internal/clitest"
+	"github.com/AUTOSOLN/mqtt-client/internal/pattern"
 )
 
 func runTool(t *testing.T, args ...string) (code int, stdout, stderr string) {
@@ -37,9 +38,9 @@ func readFile(t *testing.T, name string) string {
 	return string(b)
 }
 
-func pattern(t *testing.T, name string, size int) []byte {
+func makePattern(t *testing.T, name string, size int) []byte {
 	t.Helper()
-	b, err := cli.MakePattern(name, size)
+	b, err := pattern.Make(name, size)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +48,7 @@ func pattern(t *testing.T, name string, size int) []byte {
 }
 
 func TestReportVerified(t *testing.T) {
-	b := &clitest.Broker{Messages: [][]byte{pattern(t, "binary", 300), pattern(t, "binary", 300)}}
+	b := &clitest.Broker{Messages: [][]byte{makePattern(t, "binary", 300), makePattern(t, "binary", 300)}}
 	b.Start(t)
 	code, stdout, stderr := runTool(t, "-address", b.Addr(), "-t", "t/a", "-C", "2", "-W", "5s",
 		"-verify", "binary", "-verify-size", "300", "-report", "-")
@@ -70,9 +71,9 @@ func TestReportVerified(t *testing.T) {
 }
 
 func TestReportVerifyFailed(t *testing.T) {
-	bad := pattern(t, "binary", 300)
+	bad := makePattern(t, "binary", 300)
 	bad[7] ^= 0xff
-	b := &clitest.Broker{Messages: [][]byte{pattern(t, "binary", 300), bad, pattern(t, "binary", 299)}}
+	b := &clitest.Broker{Messages: [][]byte{makePattern(t, "binary", 300), bad, makePattern(t, "binary", 299)}}
 	b.Start(t)
 	file := filepath.Join(t.TempDir(), "report.json")
 	code, _, _ := runTool(t, "-address", b.Addr(), "-t", "t/a", "-C", "3", "-W", "5s",

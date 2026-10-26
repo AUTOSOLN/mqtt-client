@@ -3,6 +3,7 @@ package mqttclient
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -155,6 +156,48 @@ func TestConnectV5Properties(t *testing.T) {
 		t.Fatalf("ClientID %q", got)
 	}
 	rec.connect(t)
+}
+
+// Will Delay and Session Expiry are passed through Will.Properties and
+// ConnectProperties as given, including an explicit Session Expiry of 0.
+func TestConnectWillDelayAndSessionExpiry(t *testing.T) {
+	cases := []struct {
+		name        string
+		expiry      uint32
+		expiryFlag  bool
+		willDelay   uint32
+		wantSentSEI bool
+	}{
+		{"delay and expiry", 300, true, 3, true},
+		{"explicit zero expiry", 0, true, 0, true},
+		{"expiry without its flag is not sent", 300, false, 5, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newFakeBroker(t)
+			willProps := &Properties{WillDelayInterval: tc.willDelay, MessageExpiryInterval: 10}
+			c, _ := newTestClient(t, b, Server{ClientID: "c1", ProtocolVersion: MQTT5,
+				ConnectProperties: &Properties{SessionExpiryInterval: tc.expiry, SessionExpiryIntervalFlag: tc.expiryFlag},
+				Will:              &Message{Topic: "will/t", Payload: []byte("bye"), QoS: 1, Properties: willProps}})
+			connectAsync(c, 5*time.Second)
+			pk := b.accept().readConnect()
+
+			p := pk.Properties
+			if p.SessionExpiryIntervalFlag != tc.wantSentSEI {
+				t.Fatalf("Session Expiry sent = %t, want %t", p.SessionExpiryIntervalFlag, tc.wantSentSEI)
+			}
+			if tc.wantSentSEI && p.SessionExpiryInterval != tc.expiry {
+				t.Fatalf("Session Expiry %d, want %d", p.SessionExpiryInterval, tc.expiry)
+			}
+			wp := pk.Connect.WillProperties
+			if !pk.Connect.WillFlag || wp.WillDelayInterval != tc.willDelay || wp.MessageExpiryInterval != 10 {
+				t.Fatalf("will properties %+v, want Will Delay %d and Message Expiry 10", wp, tc.willDelay)
+			}
+			if !reflect.DeepEqual(*willProps, Properties{WillDelayInterval: tc.willDelay, MessageExpiryInterval: 10}) {
+				t.Fatalf("caller's will properties modified: %+v", willProps)
+			}
+		})
+	}
 }
 
 func TestReceiveMaximumFromConnectProperties(t *testing.T) {

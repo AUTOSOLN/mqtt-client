@@ -31,6 +31,7 @@ import (
 
 	mqttclient "github.com/AUTOSOLN/mqtt-client"
 	"github.com/AUTOSOLN/mqtt-client/cmd/internal/cli"
+	"github.com/AUTOSOLN/mqtt-client/internal/pattern"
 )
 
 type config struct {
@@ -78,7 +79,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.DurationVar(&cfg.wait, "W", 0, "exit after this long (0: until -C or Ctrl-C)")
 	fs.UintVar(&cfg.reason, "reason", 0, "DISCONNECT reason code (MQTT 5 only)")
 	fs.BoolVar(&cfg.quiet, "quiet", false, "print only the subscription results and the summary, not every message")
-	fs.StringVar(&cfg.verify, "verify", "", "check every payload is this mqttpub -pattern ("+cli.PatternNames()+") and print its size")
+	fs.StringVar(&cfg.verify, "verify", "", "check every payload is this mqttpub -pattern ("+pattern.Names()+") and print its size")
 	fs.IntVar(&cfg.verifySize, "verify-size", -1, "with -verify, also require payloads of exactly this many bytes")
 	fs.StringVar(&cfg.expectSession, "expect-session", "", "fail unless the CONNACK Session Present flag is this: 0 or 1")
 	fs.StringVar(&cfg.report, "report", "", "write a JSON run report to this file on exit; - writes it to stdout and the log to stderr")
@@ -117,7 +118,7 @@ func (cfg *config) check() error {
 		return errors.New("-no-local, -retain-as-published, -retain-handling, -sub-id, -user and -reason require -v 5")
 	}
 	if cfg.verify != "" {
-		if _, err := cli.MakePattern(cfg.verify, 0); err != nil {
+		if _, err := pattern.Make(cfg.verify, 0); err != nil {
 			return err
 		}
 	} else if cfg.verifySize >= 0 {
@@ -169,8 +170,8 @@ func subscribe(ctx context.Context, cfg *config, rep *cli.Report) error {
 				cli.Logf("OnMessage %s", cli.DescribeMessage(m))
 			}
 			if cfg.verify != "" {
-				if err := cli.VerifyPattern(cfg.verify, m.Payload, cfg.verifySize); err != nil {
-					var pe *cli.PatternError
+				if err := pattern.Verify(cfg.verify, m.Payload, cfg.verifySize); err != nil {
+					var pe *pattern.Error
 					if bad.Add(1) == 1 && errors.As(err, &pe) {
 						badOffset.Store(int64(pe.Offset))
 						badMessage.Store(n)
