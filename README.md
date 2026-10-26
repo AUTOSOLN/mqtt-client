@@ -63,6 +63,14 @@ For manual tests against a real broker, see [cmd/mqttconnect](cmd/mqttconnect)
 [cmd/interactiveclient](cmd/interactiveclient) (a long-running app on `Run`
 that reconnects by itself).
 
+For Sparkplug B, the [sparkplug](sparkplug) package builds and reads
+payloads and topics, and its `Edge` emits a node's BIRTH, DATA and DEATH
+messages with correct seq and bdSeq; [sparkplug/verify](sparkplug/verify)
+checks a received stream (seq gaps, reorders and duplicates, bdSeq pairing,
+stale NDEATH, DATA before BIRTH), and [cmd/sparkverify](cmd/sparkverify) runs
+it against a live broker. The payload code is generated from Eclipse Tahu's
+`sparkplug_b.proto`, which is EPL-2.0 (see its header).
+
 To probe how a broker handles packets a client should never send, see
 [cmd/mqttfuzz](cmd/mqttfuzz). Its engine is the [fuzz](fuzz) package, so a
 test can run the same YAML scenarios in-process:
