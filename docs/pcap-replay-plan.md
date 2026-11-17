@@ -1,6 +1,6 @@
 # Packet capture replay: plan
 
-Status: draft · 2026-11-17
+Status: draft · 2026-11-17 · phase 0 implemented (see [Phase 0 outcome](#phase-0-outcome))
 
 ## Goal
 
@@ -42,7 +42,7 @@ Out of scope:
 1. `capture.Read` parses every file format and link type in [Scope](#scope), and returns each TCP connection as two reassembled byte streams with timestamps. The real fixtures in [Capture sources](#capture-sources) all read correctly. A file compressed with something other than gzip (zstd, lz4) is refused with an error that names the format and asks for an uncompressed save.
 2. Retransmitted and out-of-order segments are reassembled correctly. A gap in a stream (a segment the capture missed) ends that stream with `capture.ErrGap`. It never joins bytes from either side of a gap.
 3. A connection whose first bytes from the client are a TLS handshake record is marked `TLS`. Decoding or replaying it returns `capture.ErrEncrypted`.
-4. `replay.New(timelines, opts)` plus `Server{Dial: rp.Dial}` runs the real client against the captured broker packets. Broker packets are sent byte for byte as captured (or as edited), except packet identifiers rewritten to match the ones the live client chose.
+4. `replay.New(timelines)` plus `Server{Dial: rp.Dial}` runs the real client against the captured broker packets. Broker packets are sent byte for byte as captured (or as edited), except packet identifiers rewritten to match the ones the live client chose.
 5. Each difference between what the live client sends and what the captured client sent is reported in `replay.Result`: packet type, topic, QoS, flags, payload length, and the CONNECT fields.
 6. A capture holding several connections from the same client replays them in order: when the captured broker closed the connection, the replay closes it too, and the client's next `Dial` gets the next connection. This reproduces reconnect and resend defects under `Client.Run`.
 7. `mqttsub -replay cap.pcap -t '#'` and `mqttpub -replay cap.pcap ...` run against the capture, with no network, and exit 0, 1 or 2 by the usual rules. With `-report`, the JSON report includes the replay result.
@@ -109,14 +109,16 @@ type Conn struct {
 }
 
 type Capture struct {
-	Conns []Conn
+	Conns   []Conn
+	Ignored int // frames that weren't IPv4 TCP, so an empty result can be told from a capture of something else
 }
 
 var (
 	ErrEncrypted = errors.New("capture: connection is TLS encrypted")
 	ErrGap       = errors.New("capture: bytes missing from TCP stream")
 	ErrTruncated = errors.New("capture: packet truncated by snap length")
-	ErrFormat    = errors.New("capture: not a pcap or pcapng file")
+	ErrFormat    = errors.New("capture: unsupported or invalid capture file")
+	ErrDirection = errors.New("capture: cannot tell client from server")
 )
 ```
 
@@ -151,6 +153,8 @@ type Packet struct {
 	Properties  *mqttclient.Properties // MQTT 5 only; nil otherwise
 	ReasonCodes []byte                 // CONNACK, PUBACK ... SUBACK, UNSUBACK, DISCONNECT
 	Payload     []byte                 // PUBLISH only
+	Connect     *ConnectInfo           // CONNECT only: version, client ID, clean, keepalive, Will; never the username or password
+	Filters     []mqttclient.Subscription // SUBSCRIBE; UNSUBSCRIBE (Topic only)
 
 	// Raw is the whole packet as captured, or as rebuilt by WithPayload.
 	// It is what the Replayer sends. Editing the decoded fields above
@@ -184,7 +188,7 @@ func Decode(c capture.Conn, version byte) (Timeline, error)
 // broker would. See "Edge-node captures into a subscriber".
 func Inbound(clients []Timeline) (Timeline, error)
 
-func New(timelines []Timeline, opts Options) (*Replayer, error)
+func New(timelines []Timeline) (*Replayer, error)
 
 // Dial has the signature of Server.Dial. Each call hands the next timeline
 // to Run and returns the client's end of an in-memory pipe.
@@ -202,7 +206,7 @@ How it's used in a unit test:
 ```go
 tl, err := replay.Decode(conn, 0)
 // ... optionally inspect or edit tl.Packets ...
-rp, err := replay.New([]replay.Timeline{tl}, replay.Options{})
+rp, err := replay.New([]replay.Timeline{tl})
 // ...
 var wg sync.WaitGroup
 var res replay.Result
@@ -231,7 +235,7 @@ The broker's bytes were responses to what the client sent, so the replay can't s
 - **Ping traffic** depends on timing, so captured PINGREQ and PINGRESP are skipped. A live PINGREQ is answered with PINGRESP straight away.
 - **Captured broker close:** close the pipe. Under `Client.Run` the client reconnects and its next `Dial` gets the next captured connection.
 - **Captured client close or DISCONNECT:** wait for the live client to close or send DISCONNECT.
-- **End of the timeline without a close:** the connection is done. `Run` moves on to the next one, or returns once all are done. The CLI treats `Run` returning as the end of the run, like `-W` expiring.
+- **End of the timeline without a close:** the Replayer keeps answering (acks, pings) until the live client disconnects, then reports any acknowledgement the client never sent and moves on to the next timeline. The caller decides when the run ends. For the CLI (phase 1c), the Replayer needs a way to say the timeline is finished, so the tool can disconnect like `-W` expiring.
 
 Waits select on `ctx.Done()`, so they never block forever. In the CLI, `ctx` carries `-timeout`.
 
@@ -264,7 +268,7 @@ A capture file is untrusted input.
 
 - Each pcap or pcapng record is limited to its declared snap length, and to 256 KiB at most. Larger records are rejected with `ErrFormat`.
 - Out-of-order TCP segments waiting for a gap to fill are limited to 4 MiB per stream. Past that the stream ends with `ErrGap`.
-- MQTT packets in `Decode` and `replay` are limited by `Options.MaxPacketSize` (default 1 MiB, the client's own default).
+- `Decode` needs no packet size limit: it frames packets from bytes already read, so a large declared length only means the packet is incomplete.
 - The whole file is read in one pass. Memory grows with the reassembled MQTT payload, not with the file size. Ethernet framing and duplicate segments are dropped as they're read.
 
 These are constants, not options. Per the Code rules, they become options only if a real capture needs it.
@@ -663,3 +667,23 @@ No changes to `go.mod`, `go.upstream.mod` or `integration/go.mod` in phase 1. TL
   - *Packages*: `capture` and `replay` split by what they know.
   - *Tests*: `capturetest` named for the real package.
   - *Logging*: no secrets or payloads by default.
+
+## Phase 0 outcome
+
+Implemented on 2026-11-17 in `capture`, `capture/capturetest` and `replay`. All four [proof-of-concept](#proof-of-concept-sparkplug) tests pass, as do tests for the other phase 0 risks. Each test takes under 10 ms under `-race`, except splitting segments at every offset (about 90 ms).
+
+Where the code differs from the design above (the sections above are updated to match):
+
+- `replay.New` takes no options. Nothing needed one, so there is no empty `Options` struct.
+- `Packet` gained `Connect` (the CONNECT's version, client ID, clean flag, keepalive and Will) and `Filters`. The replayer needs them to compare CONNECT and SUBSCRIBE, and `Inbound` needs the Will. The username and password are left out on purpose.
+- `capture.Capture` gained `Ignored`, and `capture` gained `ErrDirection`.
+- At the end of a timeline without a close, the replayer waits for the live client to disconnect instead of returning at once (see [Lockstep replay](#lockstep-replay)).
+- `replay` decodes SUBSCRIBE and UNSUBSCRIBE itself. comqtt's SUBSCRIBE decoder reads past the end of a truncated MQTT 5 packet, so a hostile capture could crash it. That is worth fixing in the AUTOSOLN comqtt fork.
+- `Inbound` already handles MQTT 5 topic aliases and QoS 2, because they turned out to be small. It has unit tests for aliases; QoS 2 is untested until phase 1b.
+- `Decode` has no packet size limit (see [Resource limits](#resource-limits)).
+
+Notes from testing:
+
+- A 45-second fuzzing run of `Decode` stalled at zero executions per second for about 20 seconds. None of the 136 inputs it saved is slow (all decode in under 10 ms), and a 120-second single-worker run didn't stall, so no hanging input was found. Watch for it in phase 1a fuzzing.
+- `golangci-lint` 2.12.2 on the development machine was built with Go 1.26 and can't type-check the Go 1.27 standard library, so lint has not run on this code.
+
