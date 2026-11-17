@@ -53,7 +53,18 @@ jobs:
           go-version-file: integration/go.mod
       - name: install mosquitto
         run: sudo apt-get update && sudo apt-get install -y mosquitto
+      # Ubuntu's mosquitto AppArmor profile stops the broker reading the
+      # config and persistence files the tests write under /tmp.
+      - name: unload mosquitto AppArmor profile
+        run: |
+          ls /etc/apparmor.d | grep -i mosquitto || true
+          if [ -f /etc/apparmor.d/usr.sbin.mosquitto ]; then
+            sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.mosquitto
+          fi
       - run: go vet ./...
         working-directory: integration
       - run: go test -race -count=1 ./...
         working-directory: integration
+      - name: show AppArmor denials
+        if: failure()
+        run: sudo dmesg | grep 'apparmor="DENIED"' || echo "no AppArmor denials"
