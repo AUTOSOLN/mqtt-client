@@ -14,12 +14,16 @@ The first pass covers plain TCP (usually port 1883). TLS (8883) is out of scope,
 
 In scope:
 
-- Reading classic pcap and pcapng files, as written by tcpdump, dumpcap and Wireshark.
-- Link layers: Ethernet (with 802.1Q VLAN tags), Linux cooked capture v1 and v2 (`tcpdump -i any`), raw IP, and BSD loopback (macOS `lo0`). IPv4 and IPv6.
+- Captures from both Linux tcpdump (the usual source) and Wireshark, on Linux or Windows (see [Capture sources](#capture-sources)):
+  - classic pcap, both byte orders, microsecond and nanosecond timestamps;
+  - pcapng with several sections and several interfaces of different link types;
+  - gzip-compressed files, as Wireshark can save them.
+- Link layers: Ethernet (with 802.1Q VLAN tags), Linux cooked capture v1 and v2 (`tcpdump -i any`), raw IP, and null/loopback (macOS `lo0`, Windows Npcap loopback). IPv4 and IPv6.
 - TCP reassembly into one ordered byte stream for each direction of each connection.
 - Recognising TLS connections and refusing them with a clear error.
 - Replaying a captured connection, or several in order (a reconnect sequence), into a `mqttclient.Client` through `Server.Dial`.
 - Decoded packets with every header field and the payload, as an editable timeline that the replayer accepts.
+- Replaying an edge node's capture into a subscriber: the PUBLISHes (and Will) an edge node sent are turned into what a broker would deliver to a subscriber (see [Edge-node captures into a subscriber](#edge-node-captures-into-a-subscriber)).
 - A proof of concept: Sparkplug tests that check metrics in a capture and replay it with `seq` out of order.
 - A `-replay` option in `cli.ConnFlags`, so mqttpub, mqttsub and sparkverify can run against a capture.
 - A small tool, `cmd/mqttpcap`, that lists the connections in a capture and prints each one's MQTT packet timeline, so we can see what a capture holds and pick a connection.
@@ -35,7 +39,7 @@ Out of scope:
 
 ## Acceptance criteria
 
-1. `capture.Read` parses pcap and pcapng files containing every link type in [Scope](#scope), and returns each TCP connection as two reassembled byte streams with timestamps.
+1. `capture.Read` parses every file format and link type in [Scope](#scope), and returns each TCP connection as two reassembled byte streams with timestamps. The real fixtures in [Capture sources](#capture-sources) all read correctly. A file compressed with something other than gzip (zstd, lz4) is refused with an error that names the format and asks for an uncompressed save.
 2. Retransmitted and out-of-order segments are reassembled correctly. A gap in a stream (a segment the capture missed) ends that stream with `capture.ErrGap`. It never joins bytes from either side of a gap.
 3. A connection whose first bytes from the client are a TLS handshake record is marked `TLS`. Decoding or replaying it returns `capture.ErrEncrypted`.
 4. `replay.New(timelines, opts)` plus `Server{Dial: rp.Dial}` runs the real client against the captured broker packets. Broker packets are sent byte for byte as captured (or as edited), except packet identifiers rewritten to match the ones the live client chose.
@@ -47,8 +51,9 @@ Out of scope:
 10. Malformed or hostile capture files never panic or exhaust memory. Fuzz targets cover the readers.
 11. `replay.Decode` returns each packet's direction, time, type, fixed-header flags (DUP, QoS, RETAIN), packet identifier, topic, MQTT 5 properties, reason codes, payload and raw bytes. A malformed packet keeps its raw bytes and carries its decode error.
 12. A test can edit a `Timeline` with ordinary slice operations and `Packet.WithPayload`, and replay the edited timeline. Client acks are matched by packet identifier, so reordering broker PUBLISHes doesn't cause spurious divergences.
-13. The [proof of concept](#proof-of-concept-sparkplug) tests pass: metric presence in a capture, faithful delivery of a captured Sparkplug stream, and a reordered `seq` caught by `sparkplug/verify`.
-14. `gofmt -l .`, `go vet ./...`, `go test -race -count=1 ./...` and `golangci-lint run ./...` pass. Every flag is in `-h` output and in the tool READMEs.
+13. The [proof of concept](#proof-of-concept-sparkplug) tests pass: metric presence in a capture, faithful delivery of a captured Sparkplug stream, a reordered `seq` caught by `sparkplug/verify`, and an edge node's capture delivered to a subscriber, ending with its NDEATH Will.
+14. `replay.Inbound` turns one or more client timelines into a subscriber timeline, following the rules in [Edge-node captures into a subscriber](#edge-node-captures-into-a-subscriber). `mqttsub -replay-inbound` and `sparkverify -replay-inbound` use it.
+15. `gofmt -l .`, `go vet ./...`, `go test -race -count=1 ./...` and `golangci-lint run ./...` pass. Every flag is in `-h` output and in the tool READMEs.
 
 ## Design
 
@@ -129,6 +134,14 @@ type Packet struct {
 	// Close marks a FIN or RST from Dir. A close has no bytes.
 	Close bool
 
+	// Auto marks a packet the Replayer fills in from the live client
+	// instead of sending or comparing it as captured. An Auto client
+	// packet is matched by type only. An Auto broker CONNACK, SUBACK or
+	// UNSUBACK accepts what the live client asked for (granted QoS =
+	// requested QoS). Inbound uses it; tests that build timelines by hand
+	// may too.
+	Auto bool
+
 	Type        byte // control packet type, 1 (CONNECT) to 15 (AUTH)
 	Dup         bool
 	QoS         byte
@@ -165,6 +178,11 @@ type Timeline struct {
 // when the capture has no CONNECT; 0 means read it from CONNECT. It returns
 // capture.ErrEncrypted for a TLS connection.
 func Decode(c capture.Conn, version byte) (Timeline, error)
+
+// Inbound turns timelines captured from publishing clients (edge nodes)
+// into one timeline that delivers their messages to a subscriber, as a
+// broker would. See "Edge-node captures into a subscriber".
+func Inbound(clients []Timeline) (Timeline, error)
 
 func New(timelines []Timeline, opts Options) (*Replayer, error)
 
@@ -209,6 +227,7 @@ The broker's bytes were responses to what the client sent, so the replay can't s
 - **Client packet that starts an exchange** (CONNECT, PUBLISH, SUBSCRIBE, UNSUBSCRIBE, PUBREL for the client's own QoS 2 message, DISCONNECT): wait for the live client's next such packet. Compare them, record any difference in `Result.Divergences`, and map the captured packet identifier to the live one. If the packet types differ, stop replaying this connection and record why. Nothing after that point would mean anything.
 - **Client ack of a broker PUBLISH** (PUBACK, PUBREC, PUBCOMP): not waited for by position. Acks are matched by packet identifier. Every broker PUBLISH at QoS 1 or 2 must get the right ack before the connection ends, and an ack for an identifier the broker never sent is a divergence. A broker PUBREL waits for the live client's PUBREC with the same identifier. Matching by identifier rather than position keeps edited timelines (reordered or dropped broker PUBLISHes) replayable without spurious divergences.
 - **Broker packet:** for packets whose identifier was chosen by the client (PUBACK, PUBREC, PUBCOMP, SUBACK, UNSUBACK), patch the two identifier bytes after the fixed header using the map. Everything else, including inbound PUBLISH and malformed packets, goes out byte for byte. Sending captured bytes, rather than re-encoding decoded packets, keeps malformed packets malformed, which matters when the defect is in our decoder.
+- **Auto packets:** an Auto client packet waits for the live client's next packet of that type, with no comparison. An Auto CONNACK, SUBACK or UNSUBACK is built from the live CONNECT, SUBSCRIBE or UNSUBSCRIBE: accepted, with the requested QoS granted for every filter.
 - **Ping traffic** depends on timing, so captured PINGREQ and PINGRESP are skipped. A live PINGREQ is answered with PINGRESP straight away.
 - **Captured broker close:** close the pipe. Under `Client.Run` the client reconnects and its next `Dial` gets the next captured connection.
 - **Captured client close or DISCONNECT:** wait for the live client to close or send DISCONNECT.
@@ -228,6 +247,7 @@ For a live client to line up with a capture, it must be configured the way the c
 
 - `-replay FILE`: replay this capture in place of connecting to a broker. With it, `-address` defaults to the captured server address. Setting it with `-tls` or `-config` is a setup error (exit 2).
 - `-replay-conn LIST`: which connections to replay, as comma-separated indexes from `mqttpcap -list`. The default is all plain-TCP connections in capture order.
+- `-replay-inbound`: the capture is from publishing clients (edge nodes). Deliver their messages to this tool as a subscriber, using `replay.Inbound` on the `-replay-conn` connections. Registered only by tools that subscribe (mqttsub, sparkverify).
 
 `cli.Session` owns the replay goroutine: `Start` starts it with `wg.Go`, and `Disconnect` and the end of the run wait for it. `cli.Report` gains a `replay` object (file, connections replayed, divergences). Under the report's schema rules, a new field doesn't bump `ReportSchema`.
 
@@ -249,6 +269,35 @@ A capture file is untrusted input.
 
 These are constants, not options. Per the Code rules, they become options only if a real capture needs it.
 
+### Capture sources
+
+Most captures will come from Linux tcpdump, but some will come from Wireshark, on Linux or Windows. Both are supported in phase 1. What each one produces:
+
+| Source | Typical file | What `capture` must handle |
+| --- | --- | --- |
+| `tcpdump -i any -w` on Linux | classic pcap, Linux cooked capture (v2 with libpcap 1.10 and later, v1 before) | Cooked headers; the same segment seen on two interfaces (dropped as a duplicate) |
+| `tcpdump -i eth0 -w` | classic pcap, Ethernet, maybe VLAN tags | Byte order of the writing host; nanosecond timestamps with `--time-stamp-precision=nano` |
+| Wireshark or dumpcap on Linux | pcapng, one section, often several interfaces | A link type per interface, timestamp resolution per interface (`if_tsresol`), Enhanced and Simple Packet Blocks; skip Name Resolution, Interface Statistics and other blocks |
+| Wireshark on Windows (Npcap) | pcapng, Ethernet; Npcap loopback for `localhost` traffic | Null/loopback link type, which carries the address family in host byte order |
+| Wireshark "save compressed" | pcapng or pcap inside gzip | Detect the gzip magic and read through `compress/gzip`. zstd and lz4 need dependencies, so they're refused with a clear message instead. |
+
+Older Wireshark files may contain obsolete Packet Blocks. They're read too: the format is small and fully specified.
+
+The READMEs give users one recommended command for each source:
+
+- Linux: `tcpdump -i any -s 0 -w mqtt.pcap 'tcp port 1883'`.
+- Wireshark: capture filter `tcp port 1883`, then *File → Save As* pcapng.
+
+Real fixtures, all recorded against a local mosquitto with test data only:
+
+1. `tcpdump -i any` (Linux cooked v2).
+2. `tcpdump -i lo --time-stamp-precision=nano` (Ethernet framing on loopback, nanosecond pcap).
+3. dumpcap on two interfaces, saved as pcapng.
+4. The same file saved gzip-compressed from Wireshark.
+5. A Wireshark capture on Windows with Npcap loopback.
+
+Fixture 5 needs someone with a Windows machine. Until then, a fixture built with `capturetest` covers the null/loopback link type, and the gap is listed in `capture/testdata/README.md`.
+
 ## Inspecting and editing packets
 
 Tests work at three levels. Each answers a different question about a defect report.
@@ -269,20 +318,48 @@ Editing uses ordinary Go, not a special API:
 
 Captures from the edge-node side (our client publishing) work at level 1 too: filter on `p.Dir == capture.FromClient`. At level 2, replay compares the live client's PUBLISHes with the captured ones and reports differences in topic, QoS, flags and payload length.
 
+### Edge-node captures into a subscriber
+
+A capture taken at an edge node, or at a broker with several edge nodes connected, shows what the edge nodes published. `replay.Inbound` turns that into what a broker would deliver to a subscriber, so a host-application test (or `sparkverify -replay-inbound`) consumes the edge nodes' real output.
+
+`Inbound(clients []Timeline)` builds one timeline:
+
+1. **Handshake.** An Auto client CONNECT, then an Auto CONNACK, then an Auto client SUBSCRIBE and an Auto SUBACK. The subscriber can use any client ID and any filters.
+2. **Messages.** Every client PUBLISH from the given timelines, merged in capture time order (stable, so one edge node's order is never changed), becomes a broker PUBLISH:
+   - **Topic aliases** (MQTT 5) belong to the edge node's connection, not the subscriber's. Each alias is resolved to its topic and the Topic Alias property is removed.
+   - **RETAIN** is cleared, as a broker does when forwarding to an existing subscription. **DUP** is cleared.
+   - **QoS** is kept as published.
+   - **Packet identifiers** are renumbered from 1, because several edge nodes may have used the same ones.
+   - **Payloads** are kept byte for byte. The variable header is re-encoded, as a real broker's would be.
+3. **QoS 2.** Each QoS 2 PUBLISH is followed by a broker PUBREL, which waits for the subscriber's PUBREC with the same identifier.
+4. **Wills.** If a captured connection ends without a normal DISCONNECT (a close with no DISCONNECT, or MQTT 5 reason 0x04) and its CONNECT had a Will, the Will is delivered at that point in time order. For Sparkplug, that is the edge node's NDEATH. MQTT 5 Will Delay Interval is ignored: replay keeps order, not timing.
+5. **Version.** The output keeps the captured protocol version. The subscriber must use the same one. A mix of versions across `clients` is an error.
+
+`Inbound` returns an error, naming the timeline and packet index, for anything it can't turn into a broker packet honestly: a malformed PUBLISH, an alias with no topic seen before it, or a timeline with no CONNECT. A test that wants to go ahead anyway drops those packets first. `Inbound` never skips them silently.
+
+`Inbound` is a `Timeline` → `Timeline` function, so its output can be edited and replayed like any other timeline.
+
+
 ## Proof of concept: Sparkplug
 
 A small slice of the design, built first, to prove the API before the rest of phase 1. It lives in `replay/sparkplug_test.go` (package `replay_test`).
 
-### Fixture
+### Fixtures
 
-A test helper builds one host-application session as a `capture.Conn` and passes it through `capturetest.Write` and `capture.Read`. That way the proof of concept also goes through the file path. The session:
+**Host-application session.** A test helper builds one host-application session as a `capture.Conn` and passes it through `capturetest.Write` and `capture.Read`. That way the proof of concept also goes through the file path. The session:
 
 1. Client CONNECT (MQTT 3.1.1), broker CONNACK.
 2. Client SUBSCRIBE `spBv1.0/#` at QoS 1, broker SUBACK.
 3. Broker PUBLISHes at QoS 1, from one `sparkplug.Edge` (`plant1/press7`): NBIRTH (seq 0, with `Temperature` and `Pressure`), then NDATA with seq 1, 2 and 3, each carrying both metrics. Each is followed by the client's PUBACK.
 4. Client DISCONNECT.
 
-Building it from `sparkplug.Edge` keeps the fixture readable and reuses existing code. Phase 1a adds the real tcpdump and dumpcap fixtures.
+**Edge-node session.** A second helper builds the session of an edge node, from the publisher's side:
+
+1. Client CONNECT with a Will: NDEATH from `sparkplug.Edge.Death`.
+2. Client PUBLISHes NBIRTH, then NDATA with seq 1 to 3, at QoS 1. Broker PUBACKs.
+3. The broker side closes the connection with no DISCONNECT, as if the edge node's network dropped.
+
+Building both from `sparkplug.Edge` keeps the fixtures readable and reuses existing code. Phase 1a adds the real fixtures listed in [Capture sources](#capture-sources).
 
 ### Tests
 
@@ -341,7 +418,14 @@ Each case checks two things:
 
 The "rewritten" case proves payload editing. The other two prove that reordering and dropping QoS 1 PUBLISHes doesn't upset ack matching.
 
-All three tests run on `net.Pipe`, in memory, well under 100 ms.
+**Edge node into a subscriber.**
+`TestInbound_EdgeSessionCapture_SubscriberReceivesStreamAndDeath` decodes the edge-node fixture and calls `replay.Inbound`. It replays the result into a real client subscribed to `spBv1.0/#`, then checks:
+
+- the client received NBIRTH, NDATA 1 to 3, and then NDEATH, with payloads byte-equal to what the edge node published (and, for NDEATH, to its Will);
+- no message arrived with RETAIN or DUP set;
+- the verifier reports `OK()`, with one birth, one death and a matching bdSeq.
+
+All four tests run on `net.Pipe`, in memory, well under 100 ms.
 
 ### What the proof of concept builds
 
@@ -349,10 +433,11 @@ Only what these tests need:
 
 - **`capture`:** classic pcap, Ethernet, IPv4, and TCP in order. Missing bytes end the stream with `ErrGap`; out-of-order buffering is left out.
 - **`capturetest.Write`:** classic pcap only.
-- **`replay`:** `Decode`, `Packet`, `WithPayload`, `Timeline`, and the `Replayer` for one connection. Lockstep covers CONNECT, SUBSCRIBE, broker PUBLISH at QoS 0 and 1 with acks matched by identifier, and DISCONNECT.
+- **`replay`:** `Decode`, `Packet` (with `Auto`), `WithPayload`, `Timeline`, and the `Replayer` for one connection. Lockstep covers CONNECT, SUBSCRIBE, broker PUBLISH at QoS 0 and 1 with acks matched by identifier, Auto packets, and DISCONNECT.
+- **`Inbound`:** for MQTT 3.1.1 at QoS 0 and 1, including Wills. MQTT 5 topic aliases and QoS 2 are left for phase 1b.
 - **Not included:** pcapng, other link types, IPv6, QoS 2, reconnect sequences, the CLI, or `mqttpcap`.
 
-Estimate: 3–4 days. If the API doesn't hold up in these tests, we change it before phase 1 builds on it.
+Estimate: 4–6 days. If the API doesn't hold up in these tests, we change it before phase 1 builds on it.
 
 ## Adding TLS later
 
@@ -380,7 +465,10 @@ Start with option A. Move to option B only if users can't run Wireshark.
 | Risk | Cheapest effective reduction |
 | --- | --- |
 | Reassembly joins bytes across a gap, so the replay delivers data that lies | Unit tests with missing, duplicated, overlapping and reordered segments. A gap ends the stream with `ErrGap`, and the test checks that no bytes after the gap appear. |
-| Our pcap writer and reader share the same misunderstanding of the format, so tests pass but real files fail | Commit two small real fixtures under `capture/testdata/`: one from `tcpdump -w` and one from `dumpcap` (pcapng, `-i any`), recorded against a local mosquitto with test data only. Tests read them. |
+| Our pcap writer and reader share the same misunderstanding of the format, so tests pass but real files fail | Commit the small real fixtures listed in [Capture sources](#capture-sources) under `capture/testdata/`. Tests read them. |
+| A Wireshark file uses a pcapng feature we didn't expect (several interfaces, per-interface timestamp resolution, unknown blocks) | The multi-interface dumpcap fixture, plus `capturetest` cases for each block type and for unknown blocks being skipped by their length. |
+| `Inbound` delivers something no real broker would, so a test passes or fails for the wrong reason | Each rule in [Edge-node captures into a subscriber](#edge-node-captures-into-a-subscriber) has a table test: alias resolved and removed, RETAIN and DUP cleared, identifiers unique across edge nodes, Will delivered only after an abnormal end. For the Will rule, also a one-off manual comparison against mosquitto: replay the same edge session through a real broker and compare what a subscriber gets. |
+| Merging several edge nodes changes one node's message order | Test with two interleaved edge timelines: each node's messages keep their order, and the merge is stable for equal timestamps. |
 | A hostile file panics or exhausts memory | `FuzzRead` and `FuzzDecode` (Go native fuzzing, seeded with the fixtures), plus the [resource limits](#resource-limits) with tests at each limit. |
 | Lockstep replay deadlocks: the replay and the client wait on each other | Every wait selects on `ctx.Done()`. Each test runs under `t.Context()`, so a hang fails instead of stalling. A test where the client never sends the expected packet checks that `Run` returns with that recorded as the reason. |
 | Packet identifier rewriting acks the wrong message, hiding or inventing a defect | Table test: captured identifiers differ from live ones, and the client's `OnPublish` callbacks name the live identifiers. A test with an unmapped identifier sends it unchanged and records a divergence. |
@@ -463,7 +551,7 @@ flowchart TB
         conns["capture.Conn<br/>plaintext streams"]
         tlsx["TLS decryption<br/>later phase"]
         tl["replay.Timeline<br/>decoded packets"]
-        edits["Test edits<br/>reorder, drop, WithPayload"]
+        edits["Test edits, Inbound<br/>reorder, drop, WithPayload"]
         rp["replay.Replayer"]
         pipe["net.Pipe<br/>in memory"]
         client["mqttclient.Client"]
@@ -524,10 +612,10 @@ sequenceDiagram
 
 | Phase | Work | Estimate |
 | --- | --- | --- |
-| 0 | [Proof of concept](#proof-of-concept-sparkplug): minimal `capture`, `capturetest`, `Decode`, `Packet`, `WithPayload`, single-connection `Replayer`, three Sparkplug tests | 3–4 days |
-| 1a | `capture`: the rest of pcap, pcapng, link layers, IPv4/IPv6, TCP reassembly, TLS detection, limits, fuzz targets, real fixtures | 4–6 days |
-| 1b | `replay`: QoS 2, full lockstep and divergence reporting, reconnect sequences | 2–4 days |
-| 1c | `cli` flags and report, mqttpub/mqttsub tests, `cmd/mqttpcap`, READMEs | 2–3 days |
+| 0 | [Proof of concept](#proof-of-concept-sparkplug): minimal `capture`, `capturetest`, `Decode`, `Packet`, `WithPayload`, single-connection `Replayer`, basic `Inbound`, four Sparkplug tests | 4–6 days |
+| 1a | `capture`: the rest of pcap, pcapng with several interfaces, gzip, all link types, IPv4/IPv6, TCP reassembly, TLS detection, limits, fuzz targets, real fixtures | 5–7 days |
+| 1b | `replay`: QoS 2, full lockstep and divergence reporting, reconnect sequences, `Inbound` for MQTT 5 aliases and QoS 2 | 3–5 days |
+| 1c | `cli` flags (including `-replay-inbound`) and report, mqttpub/mqttsub/sparkverify tests, `cmd/mqttpcap`, READMEs with capture instructions | 2–3 days |
 | 2 | TLS option A (exported PDUs), `-tls-keylog` | 2–3 days |
 | 2 alt | TLS option B (built-in decryption) | 1–2 weeks |
 
@@ -535,19 +623,23 @@ sequenceDiagram
 
 No changes to `go.mod`, `go.upstream.mod` or `integration/go.mod` in phase 1. TLS option B would add `golang.org/x/crypto`, listed here for review when that phase is planned.
 
+## Decisions
+
+1. **Capture sources (2026-11-17).** Captures come mostly from Linux tcpdump, sometimes from Wireshark. Both are supported in phase 1. See [Capture sources](#capture-sources).
+2. **Edge-node captures into a subscriber (2026-11-17).** Yes, in scope, including the proof of concept. See [Edge-node captures into a subscriber](#edge-node-captures-into-a-subscriber).
+
 ## Open questions
 
-1. Do user captures come mostly from Linux (`-i any`, cooked capture) or from Windows Wireshark? This changes which fixtures matter most.
-2. Should `mqttpcap` grow spec checks on both sides (unanswered QoS 1/2, acks for unknown identifiers, keepalive gaps)? Useful, but not needed to reproduce a defect.
-3. Should we provide a capture sanitiser (strip passwords and payloads) so users can send captures more easily, and so we can commit them as regression fixtures?
-4. Should a capture from the edge-node side be replayable into a subscriber? That means turning the client's captured PUBLISHes into broker PUBLISHes, so a host-application test can consume an edge node's real output. It's cheap with `Timeline` (flip `Dir`, assign identifiers), but it isn't in the proof of concept.
+1. Should `mqttpcap` grow spec checks on both sides (unanswered QoS 1/2, acks for unknown identifiers, keepalive gaps)? Useful, but not needed to reproduce a defect.
+2. Should we provide a capture sanitiser (strip passwords and payloads) so users can send captures more easily, and so we can commit them as regression fixtures?
+3. Who can record the Windows Npcap fixture?
 
 ## Standards this plan touches
 
 - **principles.md:**
   - *Failures must not be hidden*: gaps, encryption and divergences are errors or report fields.
   - *Fail safe*: `ErrGap` rather than joining streams, and replay refuses `-tls`.
-  - *Options*: `-replay` and `-replay-conn` exist because a test tool needs them to reproduce a scenario.
+  - *Options*: `-replay`, `-replay-conn` and `-replay-inbound` exist because a test tool needs them to reproduce a scenario.
   - *No hidden flags*: all documented.
   - *Dependencies*: none added.
   - *What a plan contains*: all sections present.
