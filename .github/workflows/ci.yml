@@ -57,9 +57,13 @@ jobs:
       # config and persistence files the tests write under /tmp.
       - name: unload mosquitto AppArmor profile
         run: |
-          ls /etc/apparmor.d | grep -i mosquitto || true
-          if [ -f /etc/apparmor.d/usr.sbin.mosquitto ]; then
-            sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.mosquitto
+          profiles=/sys/kernel/security/apparmor/profiles
+          if sudo grep -q '^mosquitto ' "$profiles"; then
+            echo -n mosquitto | sudo tee /sys/kernel/security/apparmor/.remove >/dev/null
+          fi
+          if sudo grep -q '^mosquitto ' "$profiles"; then
+            echo "mosquitto AppArmor profile is still loaded" >&2
+            exit 1
           fi
       - run: go vet ./...
         working-directory: integration

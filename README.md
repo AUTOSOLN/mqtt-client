@@ -59,8 +59,9 @@ go test -race ./...
 
 On Ubuntu, the `mosquitto` package's AppArmor profile stops the broker from
 opening the config the integration tests write under `/tmp`, and every test
-fails with "Unable to open config file". Unload the profile with
-`sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.mosquitto`, or point
+fails with "Unable to open config file". Unload the profile, which is named
+`mosquitto`, with
+`echo -n mosquitto | sudo tee /sys/kernel/security/apparmor/.remove`, or point
 `MOSQUITTO` at a binary the profile doesn't cover (for example one built
 from source).
 
