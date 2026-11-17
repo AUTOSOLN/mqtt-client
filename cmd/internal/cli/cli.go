@@ -55,6 +55,12 @@ type ConnFlags struct {
 
 	NoTopicCheck bool `yaml:"-"`
 
+	// -replay serves a capture file to the client in place of a broker;
+	// see replay.go.
+	Replay        string `yaml:"-"`
+	ReplayConns   string `yaml:"-"`
+	ReplayInbound bool   `yaml:"-"` // only in tools that call RegisterReplayInbound
+
 	fs *flag.FlagSet
 }
 
@@ -84,6 +90,8 @@ func (f *ConnFlags) Register(fs *flag.FlagSet) {
 	fs.UintVar(&f.WillQoS, "will-qos", 0, "Will QoS")
 	fs.BoolVar(&f.WillRetain, "will-retain", false, "Will retain flag")
 	fs.BoolVar(&f.NoTopicCheck, "no-topic-check", false, "send topics and topic filters unchecked, even if invalid (for testing a broker)")
+	fs.StringVar(&f.Replay, "replay", "", "replay this capture file (pcap or pcapng, maybe gzipped) in place of a broker; see README")
+	fs.StringVar(&f.ReplayConns, "replay-conn", "", "with -replay, the connections to replay: comma-separated indexes from mqttpcap -list (default: every plain-TCP connection)")
 }
 
 // ProtocolVersion parses -v.
@@ -234,6 +242,9 @@ type Session struct {
 	runDone    chan struct{}      // closed when Start's Run returns
 	servers    []mqttclient.Server
 
+	replay        *replayRun // nil without -replay
+	replayInbound bool
+
 	mu     sync.Mutex
 	ack    *mqttclient.ConnAck // the latest CONNACK
 	server int                 // index of its server
@@ -274,18 +285,37 @@ func ExitCode(err error) int {
 // after the logging. Its errors, and those of Start and Run, are
 // *SetupError.
 func NewSession(f *ConnFlags, h mqttclient.Handlers) (*Session, error) {
+	if err := f.checkReplayFlags(); err != nil {
+		return nil, Setup(err)
+	}
 	opts, err := f.Options()
 	if err != nil {
 		return nil, Setup(err)
 	}
+	var rr *replayRun
+	if f.Replay != "" {
+		setup, err := f.loadReplay()
+		if err != nil {
+			return nil, Setup(err)
+		}
+		rr = &replayRun{setup: setup}
+		opts.Servers[0].Dial = setup.rp.Dial
+		if !f.addressSet() {
+			opts.Servers[0].Address = setup.server.String()
+		}
+		Logf("replaying %d captured connections from %s", setup.timelines, f.Replay)
+	}
 	s := &Session{
-		Version:    opts.Servers[0].ProtocolVersion,
-		reconnects: f.Config != "",
-		timeout:    f.Timeout,
-		lost:       make(chan mqttclient.DisconnectEvent, 1),
-		closed:     make(chan mqttclient.DisconnectEvent, 1),
-		up:         make(chan struct{}),
-		servers:    opts.Servers,
+		Version: opts.Servers[0].ProtocolVersion,
+		// Several captured connections are replayed by reconnecting.
+		reconnects:    f.Config != "" || (rr != nil && rr.setup.timelines > 1),
+		replay:        rr,
+		replayInbound: f.ReplayInbound,
+		timeout:       f.Timeout,
+		lost:          make(chan mqttclient.DisconnectEvent, 1),
+		closed:        make(chan mqttclient.DisconnectEvent, 1),
+		up:            make(chan struct{}),
+		servers:       opts.Servers,
 	}
 	onPreConnect, onConnect, onDisconnect, onConnectError := h.OnPreConnect, h.OnConnect, h.OnDisconnect, h.OnConnectError
 	if s.reconnects {
@@ -422,6 +452,15 @@ func (s *Session) Lost() <-chan mqttclient.DisconnectEvent { return s.lost }
 // Run, which keeps reconnecting until Disconnect, and returns once the
 // first connection is accepted.
 func (s *Session) Start(ctx context.Context) error {
+	s.startReplay()
+	err := s.start(ctx)
+	if err != nil {
+		s.finishReplay()
+	}
+	return err
+}
+
+func (s *Session) start(ctx context.Context) error {
 	if !s.reconnects {
 		_, err := s.Connect(ctx)
 		return err
@@ -480,8 +519,9 @@ func (s *Session) Run(ctx context.Context) error {
 	return Setup(err)
 }
 
-// Hold stays connected for d, until ctx ends (Ctrl-C), or until the
-// session is lost (see Lost), which is an error.
+// Hold stays connected for d, until ctx ends (Ctrl-C), until a -replay
+// capture has been played (see Played), or until the session is lost (see
+// Lost), which is an error.
 func (s *Session) Hold(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return nil
@@ -493,6 +533,8 @@ func (s *Session) Hold(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 	case <-ctx.Done():
 		Logf("interrupted")
+	case <-s.Played():
+		Logf("capture replayed")
 	case ev := <-s.lost:
 		return fmt.Errorf("connection lost: %w", ev.Err)
 	}
@@ -527,6 +569,7 @@ func (s *Session) Disconnect(reason byte) error {
 		s.stopRun()
 		<-s.runDone
 	}
+	s.finishReplay()
 	return nil
 }
 

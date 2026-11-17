@@ -36,10 +36,11 @@ type Report struct {
 	// ExpectSession is -expect-session, null when not given.
 	ExpectSession *bool `json:"expect_session"`
 
-	Counts     ReportCounts `json:"counts"`
-	Verify     ReportVerify `json:"verify"`
-	LatencyMs  *Latency     `json:"latency_ms,omitempty"`
-	DurationMs int64        `json:"duration_ms"`
+	Counts     ReportCounts  `json:"counts"`
+	Verify     ReportVerify  `json:"verify"`
+	Replay     *ReportReplay `json:"replay,omitempty"` // with -replay only
+	LatencyMs  *Latency      `json:"latency_ms,omitempty"`
+	DurationMs int64         `json:"duration_ms"`
 
 	path           string
 	stdout, stderr io.Writer
@@ -54,6 +55,15 @@ type ReportServer struct {
 	Address  string `json:"address"`
 	Protocol string `json:"protocol"` // as -v: "31", "311" or "5"
 	TLS      bool   `json:"tls"`
+}
+
+// ReportReplay describes a -replay run.
+type ReportReplay struct {
+	File        string   `json:"file"`
+	Connections []int    `json:"connections"` // indexes of the captured connections replayed
+	Inbound     bool     `json:"inbound"`     // -replay-inbound
+	Replayed    int      `json:"replayed"`    // connections the client made to the replay
+	Divergences []string `json:"divergences"` // where the live client differed from the capture
 }
 
 // ReportCounts counts messages. A tool leaves the counts that do not apply
@@ -143,6 +153,7 @@ func (r *Report) fillConnection(err error) {
 	case r.session != nil:
 		var srv mqttclient.Server
 		srv, ack = r.session.Connection()
+		r.Replay = r.session.replayReport()
 		r.Server = ReportServer{Address: srv.Address, Protocol: versionName(srv.ProtocolVersion), TLS: srv.TLS}
 	case r.conn.Config != "":
 		// The file was not loaded, so there is no server to name.

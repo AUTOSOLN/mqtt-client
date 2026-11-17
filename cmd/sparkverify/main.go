@@ -11,14 +11,20 @@
 //
 //	sparkverify -W 10m
 //	sparkverify -v 5 -t 'spBv1.0/plant1/#' -q 1 -report run.json
+//	sparkverify -replay edge.pcap -replay-inbound
 //
-// Exit status: 0 when no rule was broken, 1 when one was, 2 for a setup
-// error.
+// With -replay it checks a packet capture instead of live traffic; with
+// -replay-inbound the capture is of the edge nodes themselves, whose
+// messages it receives as a broker would deliver them. See README.md.
+//
+// Exit status: 0 when no rule was broken, 1 when one was (or the client
+// diverged from a -replay capture), 2 for a setup error.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -50,6 +56,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	fs.SetOutput(stderr)
 	cfg.conn.Register(fs)
+	cfg.conn.RegisterReplayInbound(fs)
 	fs.Var(&cfg.topics, "t", "topic filter to subscribe to (repeatable; default spBv1.0/#)")
 	fs.UintVar(&cfg.qos, "q", 1, "requested QoS: 0, 1 or 2")
 	fs.DurationVar(&cfg.wait, "W", 0, "stop after this long (0: until Ctrl-C)")
@@ -80,6 +87,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	switch {
+	case errors.Is(err, cli.ErrDiverged):
+		cli.Logf("FAIL: %v", err)
+		return 1
 	case err != nil:
 		cli.Logf("FAIL: %v", err)
 		return 2
@@ -93,7 +103,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 // listen subscribes and feeds every message to v until -W passes, Ctrl-C,
 // or the connection is lost.
-func listen(ctx context.Context, cfg *config, v *verify.Verifier) error {
+func listen(ctx context.Context, cfg *config, v *verify.Verifier) (err error) {
 	s, err := cli.NewSession(&cfg.conn, mqttclient.Handlers{
 		OnMessage: func(_ *mqttclient.Client, m *mqttclient.Message) { v.Feed(m.Topic, m.Payload, time.Now()) },
 	})
@@ -103,7 +113,12 @@ func listen(ctx context.Context, cfg *config, v *verify.Verifier) error {
 	if err := s.Start(ctx); err != nil {
 		return err
 	}
-	defer func() { _ = s.Disconnect(0) }()
+	defer func() {
+		_ = s.Disconnect(0)
+		if rerr := s.CheckReplay(); err == nil {
+			err = rerr
+		}
+	}()
 
 	subs := make([]mqttclient.Subscription, len(cfg.topics))
 	for i, t := range cfg.topics {
@@ -127,6 +142,9 @@ func listen(ctx context.Context, cfg *config, v *verify.Verifier) error {
 	}
 	select {
 	case <-ctx.Done():
+		return nil
+	case <-s.Played():
+		cli.Logf("capture replayed")
 		return nil
 	case ev := <-s.Lost():
 		return fmt.Errorf("connection lost: %w", ev.Err)

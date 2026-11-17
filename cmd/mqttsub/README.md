@@ -28,7 +28,7 @@ go build -o build/mqttsub ./cmd/mqttsub
 
 The connection flags are listed in the [mqttpub README](../mqttpub/README.md#flags). They are
 `-address`, `-tls`, `-v`, `-id`, `-clean`, `-session-expiry`, `-keepalive`, `-u`, `-P`, `-timeout`,
-`-debug`, `-no-topic-check`, `-config`, the TLS flags and the Will flags. With `-no-topic-check`, an
+`-debug`, `-no-topic-check`, `-config`, `-replay`, `-replay-conn`, the TLS flags and the Will flags. With `-no-topic-check`, an
 invalid filter such as `a/#/+/b` is sent to the broker as given instead of being refused. `-timeout` also limits how long the tool waits for
 SUBACK and UNSUBACK.
 
@@ -51,6 +51,7 @@ SUBACK and UNSUBACK.
 | `-verify-size` | | With `-verify`, also require payloads of exactly this many bytes |
 | `-expect-session` | empty | `0` or `1`: fail (exit 1) unless the CONNACK Session Present flag is this, checked before subscribing. `1` needs `-clean=false`. With `-config`, read [-expect-session and -config](#-expect-session-and--config). Without the flag, the flag is only printed. |
 | `-report` | empty | Write a JSON run report to this file when the run ends; `-` writes it to stdout and moves the log to stderr. See below. |
+| `-replay-inbound` | `false` | With `-replay`, the capture is of publishing clients (such as Sparkplug edge nodes): deliver their messages to this tool as a broker would. See [Replaying a capture](#replaying-a-capture). |
 
 Exit status:
 - **0:** success.
@@ -58,6 +59,22 @@ Exit status:
 - **2:** a setup error: invalid arguments, or no session with a broker at all (bad TLS files or `-config`,
   the connection refused or timed out, a TLS failure, a refused CONNACK, or with `-config`, every
   server failing). Losing a connection that was established is a 1.
+
+### Replaying a capture
+
+`-replay FILE` runs the tool against a packet capture instead of a broker, and stops once the
+capture has been played. The [mqttpub README](../mqttpub/README.md#replaying-a-capture--replay)
+describes it, and how to ask a user for a capture.
+
+With `-replay-inbound`, the capture is of publishing clients, for example taken at an edge node or
+at a broker with edge nodes connected. Their PUBLISHes become what a broker would deliver to this
+subscriber: merged by capture time, with RETAIN and DUP cleared, and the Will of any client whose
+connection ended without a normal DISCONNECT (for Sparkplug, its NDEATH). The tool's own CONNECT
+and SUBSCRIBE are accepted whatever they say, so any `-id` and `-t` work:
+
+```sh
+mqttsub -replay edge.pcap -replay-inbound -t 'spBv1.0/#' -q 1
+```
 
 ### -expect-session and -config
 
