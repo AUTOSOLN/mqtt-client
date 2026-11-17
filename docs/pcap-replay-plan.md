@@ -697,13 +697,13 @@ Notes from testing:
 
 ### 1a: capture
 
-Implemented on 2026-11-17. `capture.Read` now reads everything in [Capture sources](#capture-sources) except that the real fixtures aren't recorded yet:
+Implemented on 2026-11-17. `capture.Read` now reads everything in [Capture sources](#capture-sources):
 
 - **Files:** classic pcap in both byte orders, at microsecond or nanosecond precision. pcapng with several sections, both byte orders, several interfaces with their own link type, `if_tsresol` and `if_tsoffset`, and Enhanced, Simple and obsolete Packet Blocks. Other blocks are skipped by their length. gzip-compressed files of either kind. zstd and lz4 are refused with a message.
 - **Link types:** Ethernet (with VLAN tags), Linux cooked v1 and v2, raw IP (101, 228, 229), null (0) and OpenBSD loop (108), with IPv4 and IPv6. IPv6 extension headers are walked; a first IPv6 fragment ends its connection with `ErrTruncated`, as IPv4 fragments do. A pcapng interface with an unsupported link type has its packets counted in `Ignored` rather than failing the file.
 - **Reassembly:** early segments wait, up to 4 MiB per direction, for the bytes in front of them. When a gap is confirmed (at the end of the file, or when the limit is passed), both directions are cut back to the point the gap opened. That keeps the "never joins across a gap" rule now that one direction can run ahead of the other.
 
-Real fixtures: this machine can't capture packets (tcpdump has no capture capability and sudo needs a password), so `capture/testdata/record.sh` records them instead. It needs your sudo password for tcpdump. It records `any.pcap`, `any-sll2.pcap`, `lo-nano.pcap` and `lo-nano.pcap.gz`. dumpcap isn't installed, so `dumpcap-2if.pcapng` and the Windows fixture have manual instructions in `capture/testdata/README.md`. `TestRead_RealFixtures` skips each missing file with those instructions. The checker the fixtures go through is itself tested on a built copy of the same exchange.
+Real fixtures: `capture/testdata/record.sh` records them with tcpdump against a local mosquitto, and needs a sudo password. `any.pcap` (Linux cooked v1), `any-sll2.pcap` (v2, which this machine's tcpdump picks by default for `-i any`), `lo-nano.pcap` and `lo-nano.pcap.gz` were recorded with it on 2026-11-17 and pass. dumpcap isn't installed, so `dumpcap-2if.pcapng` and the Windows fixture have manual instructions in `capture/testdata/README.md`. `TestRead_RealFixtures` skips each missing file with those instructions. The checker the fixtures go through is itself tested on a built copy of the same exchange.
 
 The 4 MiB pending limit is tested in an internal test with a smaller limit, because pushing 4 MiB through a capture file took 170 ms under `-race`.
 
