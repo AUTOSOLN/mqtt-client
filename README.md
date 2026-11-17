@@ -71,6 +71,14 @@ For manual tests against a real broker, see [cmd/mqttconnect](cmd/mqttconnect)
 [cmd/interactiveclient](cmd/interactiveclient) (a long-running app on `Run`
 that reconnects by itself).
 
+To reproduce a problem from a packet capture a user sent, see
+[cmd/mqttpcap](cmd/mqttpcap) (what a capture holds) and the tools' `-replay`
+flag (see [cmd/mqttpub](cmd/mqttpub/README.md#replaying-a-capture--replay)),
+which runs the real client against the broker's side of the capture. In
+tests, the [capture](capture) and [replay](replay) packages do the same:
+`replay.Decode` turns a captured connection into packets a test can read and
+edit, and a `replay.Replayer` serves them through `Server.Dial`.
+
 For Sparkplug B, the [sparkplug](sparkplug) package builds and reads
 payloads and topics, and its `Edge` emits a node's BIRTH, DATA and DEATH
 messages with correct seq and bdSeq; [sparkplug/verify](sparkplug/verify)

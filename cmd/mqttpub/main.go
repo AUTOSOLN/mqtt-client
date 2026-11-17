@@ -20,6 +20,10 @@
 //	mqttpub -t test/big -size 65536 -size-step 65536 -n 16 -pattern ascii -sync
 //	mqttpub -config brokers.yaml -t test/a -q 1 -n 100 -interval 1s -timeout 1m
 //	mqttpub -t test/a -q 1 -n 100 -quiet -report -
+//	mqttpub -replay capture.pcap -id edge1 -t test/a -m hello -q 1
+//
+// With -replay it runs against a packet capture instead of a broker; see
+// README.md.
 package main
 
 import (
@@ -272,6 +276,9 @@ func publish(ctx context.Context, cfg *config, props *mqttclient.Properties, rep
 	}
 	if n := st.received.Load(); n > 0 || cfg.listen > 0 {
 		cli.Logf("received %d messages", n)
+	}
+	if err := s.CheckReplay(); err != nil {
+		return err
 	}
 	if st.refused > 0 {
 		return fmt.Errorf("%d messages refused by the server", st.refused)

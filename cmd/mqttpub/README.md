@@ -44,6 +44,8 @@ Connection flags (shared with `mqttconnect`):
 | `-cafile`, `-cert`, `-key`, `-insecure`, `-servername` | | TLS, as in `mqttconnect` |
 | `-will-topic`, `-will-payload`, `-will-qos`, `-will-retain` | | Will, as in `mqttconnect` |
 | `-no-topic-check` | `false` | Send topics and topic filters (including the Will topic) without checking them, so an invalid one such as `a/#/b` or `a/+` reaches the broker. For testing how a broker handles them. |
+| `-replay` | empty | Run against this packet capture instead of a broker. See [Replaying a capture](#replaying-a-capture--replay). |
+| `-replay-conn` | every plain-TCP connection | With `-replay`, the captured connections to replay: comma-separated indexes from `mqttpcap -list` |
 
 Publish flags:
 
@@ -174,6 +176,57 @@ build/mqttpub -config cmd/brokers.example.yaml -t test/a -q 1 -n 60 -interval 1s
 
 Stop and restart a broker while it runs. The log shows `OnDisconnect`, `connecting to server …`,
 the new `OnConnect`, and then the queued messages completing.
+
+## Replaying a capture (-replay)
+
+When a user reports a problem, ask for a packet capture of it, and replay it to reproduce the
+problem with this client. `-replay FILE` serves the broker's side of the capture to the tool,
+in memory, in place of a broker: nothing goes over the network. The tool connects, publishes or
+subscribes as usual, and stops once the broker's side has been played.
+
+The tool must be set up as the captured client was: the same `-v`, `-id`, `-clean`, `-keepalive`,
+topics and QoS. Use [mqttpcap](../mqttpcap/README.md) to see what the capture holds. Wherever the
+tool does something different from the captured client (another topic, a missing DUP flag on a
+resend, an acknowledgement it never sends), the run reports a divergence and exits 1. A protocol
+version mismatch ends the replay at once.
+
+- `-address` defaults to the captured broker's address; it only names the server in the log and
+  the report.
+- `-replay-conn` picks connections by their `mqttpcap -list` index. Several connections are
+  replayed in order: the tool reconnects after each captured connection ends, as it does with
+  `-config`.
+- `-replay` can't be combined with `-tls` (a replay runs without TLS) or `-config`.
+- A capture that starts in the middle of a session (no CONNECT) can be read with `mqttpcap`, but
+  not replayed.
+- TLS captures (port 8883) are encrypted and can't be replayed yet.
+- If the capture ends with the broker closing the connection, the tool may report the connection
+  as lost, as it was when captured.
+
+The [run report](#run-report--report) gains a `replay` object:
+
+```json
+"replay": { "file": "capture.pcap", "connections": [0], "inbound": false, "replayed": 1, "divergences": [] }
+```
+
+`mqttsub` and `sparkverify` also have `-replay-inbound`, for a capture of publishing clients
+(edge nodes): their messages are delivered to the tool as a broker would deliver them, including
+the Will of a client whose connection dropped. See the [mqttsub README](../mqttsub/README.md).
+
+### Asking a user for a capture
+
+On Linux, capture on the machine running the client or the broker:
+
+```sh
+sudo tcpdump -i any -s 0 -w mqtt.pcap 'tcp port 1883'
+```
+
+In Wireshark (Linux or Windows), use the capture filter `tcp port 1883`, and save the result with
+*File → Save As* as pcapng (or pcap). Compressed saves (gzip) are fine.
+
+Start the capture before the client connects, so the CONNECT is in it, and stop it after the
+problem. Tell the user that a capture holds everything the client and broker sent, including
+usernames, passwords and message contents, and to use test credentials where they can. Never
+commit a user's capture to the repository.
 
 ## Reading the output
 

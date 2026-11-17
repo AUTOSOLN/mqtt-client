@@ -293,3 +293,64 @@ func TestReplay_LiveResendWithoutDup_Divergence(t *testing.T) {
 		t.Errorf("got divergences %v, want one about DUP", res.Divergences)
 	}
 }
+
+// The tool waits for Played before it disconnects, so Played must not wait
+// for the client's DISCONNECT at the end of the capture.
+func TestReplayer_Played_ClosedBeforeTheCapturedClientDisconnect(t *testing.T) {
+	s := newSession(t, hostAddr, brokerAddr)
+	connect := enc(t, connectPk("host1", true))
+	s.client(connectPk("host1", true)).server(packets.Packet{FixedHeader: fh(packets.Connack)})
+	s.client(packets.Packet{FixedHeader: fh(packets.Disconnect)})
+	rp, err := replay.New([]replay.Timeline{decode(t, s.clientClose().conn)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rc, wait := dialRaw(t, rp)
+	rc.send(connect)
+	rc.expect([]byte{0x20, 2, 0, 0})
+	select {
+	case <-rp.Played():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Played not closed while the replay waits for the client's DISCONNECT")
+	}
+	rc.send([]byte{0xe0, 0})
+	if res := wait(); len(res.Divergences) != 0 {
+		t.Errorf("got divergences %v, want none", res.Divergences)
+	}
+}
+
+// Regression: Played closed as soon as the last QoS 1 PUBLISH was written,
+// so a tool could disconnect before the client acknowledged and handled
+// it, losing the message.
+func TestReplayer_Played_WaitsForTheLastAcknowledgement(t *testing.T) {
+	s := newSession(t, hostAddr, brokerAddr)
+	connect := enc(t, connectPk("host1", true))
+	s.client(connectPk("host1", true)).server(packets.Packet{FixedHeader: fh(packets.Connack)})
+	s.server(publishPk("t", 1, 1, []byte("last"))).client(ack(packets.Puback, 1))
+	s.client(packets.Packet{FixedHeader: fh(packets.Disconnect)})
+	rp, err := replay.New([]replay.Timeline{decode(t, s.clientClose().conn)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rc, wait := dialRaw(t, rp)
+	rc.send(connect)
+	rc.expect([]byte{0x20, 2, 0, 0})
+	rc.expect(enc(t, publishPk("t", 1, 1, []byte("last"))))
+	select {
+	case <-rp.Played():
+		t.Fatal("Played closed before the PUBACK")
+	default:
+	}
+	rc.send([]byte{0x40, 2, 0, 1})
+	select {
+	case <-rp.Played():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Played not closed after the PUBACK")
+	}
+	rc.send([]byte{0xe0, 0})
+	if res := wait(); len(res.Divergences) != 0 {
+		t.Errorf("got divergences %v, want none", res.Divergences)
+	}
+}

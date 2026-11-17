@@ -1,6 +1,6 @@
 # Packet capture replay: plan
 
-Status: draft · 2026-11-17 · phases 0, 1a and 1b implemented (see [Phase 0 outcome](#phase-0-outcome) and [Phase 1 outcome](#phase-1-outcome))
+Status: draft · 2026-11-17 · phases 0 and 1 implemented (see [Phase 0 outcome](#phase-0-outcome) and [Phase 1 outcome](#phase-1-outcome))
 
 ## Goal
 
@@ -198,9 +198,10 @@ func (r *Replayer) Dial(ctx context.Context, network, address string) (net.Conn,
 // is replayed or ctx is cancelled.
 func (r *Replayer) Run(ctx context.Context) (Result, error)
 
-// Played is closed once the last timeline has been played to its end, or
-// Run has returned. A tool replaying a capture waits on it to know when to
-// stop.
+// Played is closed once the broker's side of the last timeline has been
+// played (its last packet sent, and every QoS 1 and 2 PUBLISH it sent
+// acknowledged), or Run has returned. A tool replaying a capture waits on
+// it to know when to stop.
 func (r *Replayer) Played() <-chan struct{}
 ```
 
@@ -715,4 +716,23 @@ Implemented on 2026-11-17:
 - **Divergences:** PUBLISH comparison now includes DUP, so a resend without DUP is caught. Tests cover a live PUBLISH that differs field by field, a broker acknowledgement for an identifier the live client never sent (sent unchanged and reported), and a live PINGREQ answered at once.
 - **Mid-session captures:** `replay.New` refuses a timeline that doesn't start with the client's CONNECT, saying why. The timeline can still be decoded and read.
 - **For the CLI:** `Replayer.Played` is closed once the last timeline has been played, and `Result.Replayed` counts the timelines a live client connected for.
+
+### 1c: tools
+
+Implemented on 2026-11-17:
+
+- `cli.ConnFlags` has `-replay` and `-replay-conn`, so mqttpub, mqttsub and sparkverify all have them. mqttsub and sparkverify also register `-replay-inbound`. `cli.Session` owns the Replayer's goroutine: it starts with `Start` and is stopped and waited for in `Disconnect`. `Session.CheckReplay` turns divergences, or connections never replayed, into an error wrapping `cli.ErrDiverged`, and the tools exit 1 for it. `cli.Report` has a `replay` object.
+- `cmd/mqttpcap` lists connections (`-list`) and prints one connection's packets (`-conn N`, with `-v` and `-payload`).
+- The READMEs cover every flag. The mqttpub README describes replay and how to ask a user for a capture. The top-level README points to the tools and packages.
+- One test runs mqttsub against `clitest.Broker` and against a capture of the same exchange, and compares the reports. `clitest.Capture` builds captures for the tool tests.
+
+Where the code differs from the design above:
+
+- **`Played` waits for the broker's side, not the whole timeline.** A captured session usually ends with the client's DISCONNECT. If `Played` waited for the whole timeline, the replay would wait for the tool to disconnect while the tool waited for `Played`. It now closes once the last broker packet has been sent and the client has acknowledged every QoS 1 and 2 PUBLISH. The acknowledgement part was added after a test lost the last message: the tool disconnected before the client could send its PUBACK.
+- **Several connections are replayed by reconnecting.** With more than one connection selected, the session runs `Client.Run`, as it does with `-config`, instead of refusing. `-replay` with `-config` is still a setup error.
+- **`-address` is optional with `-replay`.** It defaults to the captured server's address, which only names the server in the log and report.
+- **sparkverify exits 1 for a divergence.** Its other errors stay at exit 2.
+- **mqttpcap exits 1 when `-list` shows a TLS connection,** like any connection it can't decode, so a script can tell that part of the capture wasn't read.
+
+Known limit: if a capture ends with the broker closing the connection, the tool can see the lost connection before `Played`, and then reports the connection as lost (exit 1), as it was when captured. The READMEs say so.
 

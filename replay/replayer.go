@@ -98,10 +98,13 @@ func New(timelines []Timeline) (*Replayer, error) {
 	return &Replayer{timelines: timelines, conns: make(chan net.Conn), done: make(chan struct{}), played: make(chan struct{})}, nil
 }
 
-// Played is closed once the last timeline has been played to its end (the
-// live client may still be sending acknowledgements, and the Replayer
-// keeps answering until it disconnects), or Run has returned. A tool
-// replaying a capture waits on it to know when to stop.
+// Played is closed once the broker's side of the last timeline has been
+// played, or Run has returned. The broker's side is played when its last
+// broker packet has been sent (or it has none) and the live client has
+// acknowledged every QoS 1 and 2 PUBLISH it was sent, so it has handled
+// them all. What is left is the client's, such as the DISCONNECT that the
+// Replayer waits for. A tool replaying a capture waits on it to know when
+// to stop.
 func (r *Replayer) Played() <-chan struct{} { return r.played }
 
 func (r *Replayer) markPlayed() { r.playOnce.Do(func() { close(r.played) }) }
@@ -173,7 +176,8 @@ type session struct {
 	want  map[uint16]byte   // identifier of a broker PUBLISH -> the client acknowledgement still expected
 	last  map[byte]Packet   // the latest live CONNECT, SUBSCRIBE and UNSUBSCRIBE, for Auto answers
 
-	played func() // called when the timeline has been played, for the last timeline; nil otherwise
+	played        func() // called when the broker's side has been played, for the last timeline; nil otherwise
+	playWhenAcked bool   // the last broker packet has been sent; play once want is empty
 }
 
 // liveEvent is a packet from the live client, or the error that ended its
@@ -203,15 +207,35 @@ func (s *session) serve(ctx context.Context) {
 		wg.Wait()
 	}()
 
+	// The broker's side is played once its last packet has been sent.
+	lastBroker := -1
+	for i, p := range s.tl.Packets {
+		if p.Dir == capture.FromServer && !p.Close {
+			lastBroker = i
+		}
+	}
+	if lastBroker < 0 {
+		s.playWhenAcked = true
+		s.maybePlayed()
+	}
 	for i, p := range s.tl.Packets {
 		if !s.step(i, p) {
 			return
 		}
-	}
-	if s.played != nil {
-		s.played()
+		if i == lastBroker {
+			s.playWhenAcked = true
+			s.maybePlayed()
+		}
 	}
 	s.drain(-1)
+}
+
+// maybePlayed calls played once the last broker packet has been sent and
+// acknowledged.
+func (s *session) maybePlayed() {
+	if s.played != nil && s.playWhenAcked && len(s.want) == 0 {
+		s.played()
+	}
 }
 
 // read decodes packets from the live client and sends them to serve,
@@ -363,6 +387,7 @@ func (s *session) aside(i int, p Packet) bool {
 			s.want[p.PacketID] = Pubrel // the broker's PUBREL is next
 		default:
 			delete(s.want, p.PacketID)
+			s.maybePlayed()
 		}
 		return true
 	}

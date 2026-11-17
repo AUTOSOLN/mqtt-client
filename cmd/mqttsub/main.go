@@ -16,6 +16,13 @@
 //	mqttsub -t test/big -verify ascii -quiet
 //	mqttsub -config brokers.yaml -t 'test/#' -q 1
 //	mqttsub -t test/big -verify binary -C 10 -W 1m -quiet -report -
+//	mqttsub -replay capture.pcap -id host1 -t 'spBv1.0/#' -q 1
+//	mqttsub -replay edge.pcap -replay-inbound -t 'spBv1.0/#' -q 1
+//
+// With -replay it runs against a packet capture instead of a broker, and
+// stops once the capture has been played; with -replay-inbound the
+// capture is of publishing clients, whose messages it receives. See
+// README.md.
 package main
 
 import (
@@ -66,6 +73,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	fs.SetOutput(stderr)
 	cfg.conn.Register(fs)
+	cfg.conn.RegisterReplayInbound(fs)
 	fs.Var(&cfg.topics, "t", "topic filter to subscribe to (repeatable)")
 	fs.Var(&cfg.unsubFirst, "U", "topic filter to unsubscribe from right after connecting (repeatable)")
 	fs.UintVar(&cfg.qos, "q", 0, "requested QoS for every filter: 0, 1 or 2")
@@ -204,6 +212,9 @@ func subscribe(ctx context.Context, cfg *config, rep *cli.Report) error {
 	if derr := s.Disconnect(byte(cfg.reason)); err == nil {
 		err = derr
 	}
+	if rerr := s.CheckReplay(); err == nil {
+		err = rerr
+	}
 	cli.Logf("received %d messages", received.Load())
 	if cfg.verify != "" {
 		cli.Logf("verified %d, bad %d", received.Load()-bad.Load(), bad.Load())
@@ -309,6 +320,8 @@ func receive(ctx context.Context, cfg *config, s *cli.Session, enough <-chan str
 	case <-timeout:
 	case <-ctx.Done():
 		cli.Logf("interrupted")
+	case <-s.Played():
+		cli.Logf("capture replayed")
 	case ev := <-s.Lost():
 		return fmt.Errorf("connection lost: %w", ev.Err)
 	}

@@ -1,6 +1,8 @@
-// Package clitest is a scripted MQTT 3.1.1 broker for testing the tools
-// under cmd without a real one: it accepts CONNECT, acknowledges PUBLISH at
-// every QoS, grants every SUBSCRIBE and then sends its Messages.
+// Package clitest helps test the tools under cmd without a real broker.
+// Broker is a scripted MQTT 3.1.1 broker: it accepts CONNECT, acknowledges
+// PUBLISH at every QoS, grants every SUBSCRIBE and then sends its
+// Messages. Capture builds packet capture files for the tools' -replay
+// flags and for mqttpcap.
 package clitest
 
 import (
