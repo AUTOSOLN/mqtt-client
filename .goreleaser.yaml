@@ -35,6 +35,10 @@ builds:
     id: sparkverify
     main: ./cmd/sparkverify
     binary: sparkverify
+  - <<: *defaults
+    id: mqttpcap
+    main: ./cmd/mqttpcap
+    binary: mqttpcap
 
 archives:
   - formats: [tar.gz]
@@ -53,6 +57,8 @@ archives:
         dst: README-mqttconnect.md
       - src: cmd/mqttfuzz/README.md
         dst: README-mqttfuzz.md
+      - src: cmd/mqttpcap/README.md
+        dst: README-mqttpcap.md
       - src: cmd/mqttpub/README.md
         dst: README-mqttpub.md
       - src: cmd/mqttsub/README.md
