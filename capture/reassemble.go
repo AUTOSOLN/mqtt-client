@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/netip"
+	"slices"
 	"time"
 )
 
@@ -15,11 +16,24 @@ const (
 	flagACK = 0x10
 )
 
+// maxPending bounds the out-of-order bytes held for one direction while
+// waiting for a missing segment. Past it, the bytes are taken as lost.
+const maxPending = 4 << 20
+
+// early is a segment that arrived before the bytes in front of it.
+type early struct {
+	seq  uint32
+	data []byte
+}
+
 // half is one direction of a flow.
 type half struct {
 	started bool       // next is known
 	next    uint32     // sequence number of the next expected byte
 	closed  *time.Time // FIN or RST seen
+	pending []early    // out-of-order segments, in arrival order
+	held    int        // bytes in pending
+	gapAt   int        // len(flow.segs) when pending last became non-empty
 }
 
 type rawSegment struct {
@@ -51,13 +65,14 @@ func (f *flow) closed() bool { return f.halves[0].closed != nil || f.halves[1].c
 
 // assembler collects segments into flows.
 type assembler struct {
-	open    map[[2]netip.AddrPort]*flow // the latest flow for each pair of endpoints
-	flows   []*flow                     // every flow, in order of first packet
-	ignored int
+	open       map[[2]netip.AddrPort]*flow // the latest flow for each pair of endpoints
+	flows      []*flow                     // every flow, in order of first packet
+	ignored    int
+	maxPending int // maxPending, except in tests
 }
 
 func newAssembler() *assembler {
-	return &assembler{open: make(map[[2]netip.AddrPort]*flow)}
+	return &assembler{open: make(map[[2]netip.AddrPort]*flow), maxPending: maxPending}
 }
 
 // pairKey is the same for both directions of a connection.
@@ -102,24 +117,51 @@ func (a *assembler) segment(t time.Time, src, dst netip.AddrPort, seq uint32, fl
 		if !h.started { // the capture began after the handshake
 			h.started, h.next = true, seq
 		}
-		switch d := int64(int32(seq - h.next)); {
-		case d > 0:
-			f.err = fmt.Errorf("%w: %d bytes from %v missing at %v", ErrGap, d, src, t)
-			return
-		case d < 0: // a retransmission, maybe with new bytes at the end
-			if -d >= int64(len(payload)) {
-				payload = nil
-			} else {
-				payload = payload[-d:]
+		if int32(seq-h.next) > 0 { // bytes in front of it are missing, for now
+			if len(h.pending) == 0 {
+				h.gapAt = len(f.segs)
 			}
+			h.pending = append(h.pending, early{seq: seq, data: bytes.Clone(payload)})
+			h.held += len(payload)
+			if h.held > a.maxPending {
+				f.err = fmt.Errorf("%w: more than %d bytes from %v waited for a missing segment at %v", ErrGap, a.maxPending, src, t)
+				f.segs = f.segs[:h.gapAt]
+			}
+			return
 		}
-		if len(payload) > 0 {
-			f.segs = append(f.segs, rawSegment{side: i, t: t, data: bytes.Clone(payload)})
-			h.next += uint32(len(payload))
-		}
+		f.deliver(i, t, seq, payload)
+		f.drainPending(i, t)
 	}
 	if flags&(flagFIN|flagRST) != 0 && h.closed == nil {
 		h.closed = &t
+	}
+}
+
+// deliver appends the bytes of a segment that aren't already in the
+// stream; seq is at or before the next expected byte.
+func (f *flow) deliver(i int, t time.Time, seq uint32, payload []byte) {
+	h := &f.halves[i]
+	if behind := int64(h.next - seq); behind >= int64(len(payload)) { // a retransmission of bytes we have
+		return
+	} else if behind > 0 {
+		payload = payload[behind:]
+	}
+	f.segs = append(f.segs, rawSegment{side: i, t: t, data: bytes.Clone(payload)})
+	h.next += uint32(len(payload))
+}
+
+// drainPending delivers held segments that the stream has caught up with.
+func (f *flow) drainPending(i int, t time.Time) {
+	h := &f.halves[i]
+	for {
+		j := slices.IndexFunc(h.pending, func(e early) bool { return int32(e.seq-h.next) <= 0 })
+		if j < 0 {
+			return
+		}
+		e := h.pending[j]
+		h.pending = slices.Delete(h.pending, j, j+1)
+		h.held -= len(e.data)
+		f.deliver(i, t, e.seq, e.data)
 	}
 }
 
@@ -130,6 +172,19 @@ var serverPorts = map[uint16]bool{1883: true, 8883: true}
 func (a *assembler) finish() *Capture {
 	c := &Capture{Ignored: a.ignored, Conns: make([]Conn, 0, len(a.flows))}
 	for _, f := range a.flows {
+		// A segment still missing at the end is a gap: nothing either side
+		// sent after it opened can be placed reliably.
+		cut := len(f.segs)
+		for i, h := range f.halves {
+			if len(h.pending) == 0 {
+				continue
+			}
+			if f.err == nil {
+				f.err = fmt.Errorf("%w: bytes from %v before sequence number %d were never captured", ErrGap, f.ends[i], h.pending[0].seq)
+			}
+			cut = min(cut, h.gapAt)
+		}
+		f.segs = f.segs[:cut]
 		client, ok := f.client, f.clientKnown
 		if !ok {
 			client, ok = clientByContent(f)

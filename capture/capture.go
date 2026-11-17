@@ -1,17 +1,30 @@
-// Package capture reads packet capture files, as written by tcpdump, and
-// returns each TCP connection in them as two reassembled byte streams, one
-// per direction, with timestamps. It knows nothing about MQTT: package
-// replay decodes the streams.
+// Package capture reads packet capture files, as written by tcpdump,
+// dumpcap and Wireshark, and returns each TCP connection in them as two
+// reassembled byte streams, one per direction, with timestamps. It knows
+// nothing about MQTT: package replay decodes the streams.
 //
-// Supported so far: classic pcap (either byte order, microsecond or
-// nanosecond timestamps) with Ethernet framing (802.1Q VLAN tags allowed),
-// IPv4 and TCP whose segments arrive in order. A retransmitted segment is
-// dropped as a duplicate. A segment the capture missed ends the
-// connection's streams with ErrGap; bytes from either side of a gap are
-// never joined.
+// Read accepts:
 //
-// A capture file is untrusted input: Read never panics on its contents and
-// limits each record to 256 KiB.
+//   - classic pcap, in either byte order, with microsecond or nanosecond
+//     timestamps;
+//   - pcapng, with several sections and several interfaces, each with its
+//     own link type and timestamp resolution;
+//   - either of those compressed with gzip.
+//
+// The link types read are Ethernet (with 802.1Q VLAN tags), Linux cooked
+// capture v1 and v2 (tcpdump -i any), raw IP, and null/loopback (macOS
+// lo0, Windows Npcap loopback), carrying IPv4 or IPv6. Packets on other
+// link types, and frames that aren't TCP, are counted in Capture.Ignored.
+//
+// TCP segments are reassembled in sequence order: a retransmitted or
+// duplicated segment is dropped, and one that arrives early waits for the
+// bytes in front of it. A segment the capture missed ends the connection's
+// streams with ErrGap at the point the gap opened, in both directions:
+// bytes from either side of a gap are never joined.
+//
+// A capture file is untrusted input. Read never panics on its contents,
+// limits each frame to 256 KiB, each pcapng block to 16 MiB, and the bytes
+// waiting for a missing segment to 4 MiB per direction.
 package capture
 
 import (

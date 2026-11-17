@@ -2,6 +2,8 @@ package capture_test
 
 import (
 	"bytes"
+	"compress/gzip"
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"testing"
@@ -237,6 +239,29 @@ func FuzzRead(f *testing.F) {
 		f.Fatal(err)
 	}
 	f.Add(buf.Bytes())
+	var zipped bytes.Buffer
+	zw := gzip.NewWriter(&zipped)
+	if _, err := zw.Write(buf.Bytes()); err != nil {
+		f.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		f.Fatal(err)
+	}
+	f.Add(zipped.Bytes())
+	var ng bytes.Buffer
+	p, err := capturetest.NewPcapngWriter(&ng, binary.BigEndian)
+	if err != nil {
+		f.Fatal(err)
+	}
+	if _, err := p.Interface(capturetest.LinkLinuxSLL2, 9); err != nil {
+		f.Fatal(err)
+	}
+	if err := capturetest.WriteConn(tcpFrames(capturetest.LinuxSLL2, func(t time.Time, fr []byte) error {
+		return p.Packet(0, t, fr, 0)
+	}), exchange(client6, server6, 0)); err != nil {
+		f.Fatal(err)
+	}
+	f.Add(ng.Bytes())
 	f.Fuzz(func(t *testing.T, b []byte) {
 		c, err := capture.Read(bytes.NewReader(b))
 		if err == nil && c == nil {
