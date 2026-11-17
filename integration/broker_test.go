@@ -24,7 +24,7 @@ type broker struct {
 	addr string
 	cmd  *exec.Cmd
 
-	// The running process; set by start, cleared by kill and stop.
+	// The last process started; each start replaces them.
 	stderr *bytes.Buffer // read only after exited is closed
 	exited chan struct{} // closed when the process has exited
 	err    error         // exit status, set before exited is closed
