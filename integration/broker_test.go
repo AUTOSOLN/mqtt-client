@@ -5,7 +5,9 @@
 package integration
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -21,6 +23,11 @@ type broker struct {
 	conf string
 	addr string
 	cmd  *exec.Cmd
+
+	// The last process started; each start replaces them.
+	stderr *bytes.Buffer // read only after exited is closed
+	exited chan struct{} // closed when the process has exited
+	err    error         // exit status, set before exited is closed
 }
 
 func mosquittoBinary(t *testing.T) string {
@@ -67,45 +74,86 @@ func newBroker(t *testing.T, persistence bool) *broker {
 
 func (b *broker) address() string { return b.addr }
 
-// start runs the broker and waits until it accepts connections.
+// start runs the broker and waits until it accepts connections. If mosquitto
+// exits or does not listen within 5s, the test fails with its exit status and
+// output.
 func (b *broker) start() {
 	b.t.Helper()
+	b.stderr = new(bytes.Buffer)
 	b.cmd = exec.Command(b.bin, "-c", b.conf)
+	// mosquitto logs to stderr by default.
+	b.cmd.Stderr = b.stderr
 	if testing.Verbose() {
-		b.cmd.Stderr = os.Stderr
+		b.cmd.Stderr = io.MultiWriter(b.stderr, os.Stderr)
 	}
 	if err := b.cmd.Start(); err != nil {
 		b.t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	// One goroutine owns Wait; kill and stop wait for it to finish.
+	b.exited = make(chan struct{})
+	go func(cmd *exec.Cmd, exited chan<- struct{}) {
+		b.err = cmd.Wait()
+		close(exited)
+	}(b.cmd, b.exited)
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
 		if nc, err := net.Dial("tcp", b.addr); err == nil {
 			nc.Close()
 			return
 		}
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-tick.C:
+		case <-b.exited:
+			b.fail("mosquitto exited before listening on %s: %v", b.addr, b.err)
+			return
+		case <-deadline.C:
+			b.kill()
+			b.fail("mosquitto did not listen on %s within 5s", b.addr)
+			return
+		}
 	}
-	b.t.Fatalf("mosquitto did not start on %s", b.addr)
+}
+
+// fail ends the test with mosquitto's output. The process must have exited.
+func (b *broker) fail(format string, args ...any) {
+	b.t.Helper()
+	b.t.Fatalf(format+"\nconfig %s:\n%s\nmosquitto output:\n%s",
+		append(args, b.conf, readFile(b.conf), b.stderr)...)
+}
+
+// readFile returns the file's contents, or the error if it can't be read.
+func readFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err.Error()
+	}
+	return string(data)
 }
 
 // kill stops the broker abruptly (SIGKILL): connections drop without
 // DISCONNECT and nothing is saved.
 func (b *broker) kill() {
-	if b.cmd == nil {
-		return
-	}
-	_ = b.cmd.Process.Kill()
-	_ = b.cmd.Wait()
-	b.cmd = nil
+	b.signal(os.Kill)
 }
 
 // stop shuts the broker down cleanly (SIGTERM), saving persistent sessions.
 func (b *broker) stop() {
-	b.t.Helper()
+	b.signal(syscall.SIGTERM)
+}
+
+// signal sends sig and waits for the broker to exit. It does nothing if the
+// broker isn't running.
+func (b *broker) signal(sig os.Signal) {
 	if b.cmd == nil {
 		return
 	}
-	_ = b.cmd.Process.Signal(syscall.SIGTERM)
-	_ = b.cmd.Wait()
+	// Signal fails only if the process has already exited, which the
+	// receive below handles.
+	_ = b.cmd.Process.Signal(sig)
+	<-b.exited
 	b.cmd = nil
 }
