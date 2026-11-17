@@ -3,6 +3,8 @@ package replay_test
 import (
 	"bytes"
 	"context"
+	"io"
+	"net"
 	"net/netip"
 	"sync"
 	"testing"
@@ -45,6 +47,17 @@ func enc(t testing.TB, pk packets.Packet) []byte {
 		err = pk.PublishEncode(&buf)
 	case packets.Puback:
 		err = pk.PubackEncode(&buf)
+	case packets.Pubrec:
+		err = pk.PubrecEncode(&buf)
+	case packets.Pubrel:
+		pk.FixedHeader.Qos = 1 // the required flags 0010
+		err = pk.PubrelEncode(&buf)
+	case packets.Pubcomp:
+		err = pk.PubcompEncode(&buf)
+	case packets.Pingreq:
+		err = pk.PingreqEncode(&buf)
+	case packets.Pingresp:
+		err = pk.PingrespEncode(&buf)
 	case packets.Subscribe:
 		pk.FixedHeader.Qos = 1 // the required flags 0010
 		err = pk.SubscribeEncode(&buf)
@@ -239,12 +252,15 @@ func startReplay(t *testing.T, tls []replay.Timeline, srv mqttclient.Server) *ru
 }
 
 // subscribe connects and subscribes to filter at QoS 1.
-func (r *run) subscribe(filter string) {
+func (r *run) subscribe(filter string) { r.subscribeQoS(filter, 1) }
+
+// subscribeQoS connects and subscribes to filter at qos.
+func (r *run) subscribeQoS(filter string, qos byte) {
 	r.t.Helper()
 	if _, err := r.c.Connect(r.ctx); err != nil {
 		r.t.Fatalf("Connect: %v", err)
 	}
-	if _, err := r.c.Subscribe(r.ctx, []mqttclient.Subscription{{Topic: filter, QoS: 1}}, nil); err != nil {
+	if _, err := r.c.Subscribe(r.ctx, []mqttclient.Subscription{{Topic: filter, QoS: qos}}, nil); err != nil {
 		r.t.Fatalf("Subscribe: %v", err)
 	}
 }
@@ -275,4 +291,60 @@ func (r *run) finish() replay.Result {
 		r.t.Errorf("Run: %v", r.err)
 	}
 	return r.res
+}
+
+// rawConn is a hand-driven client connection to a Replayer, for tests
+// that send exact bytes.
+type rawConn struct {
+	t  *testing.T
+	nc net.Conn
+}
+
+// dialRaw starts rp.Run and dials it. Call wait to close the connection
+// and get Run's result.
+func dialRaw(t *testing.T, rp *replay.Replayer) (*rawConn, func() replay.Result) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	t.Cleanup(cancel)
+	var wg sync.WaitGroup
+	var res replay.Result
+	var runErr error
+	wg.Go(func() { res, runErr = rp.Run(ctx) })
+	t.Cleanup(wg.Wait)
+	nc, err := rp.Dial(ctx, "tcp", brokerAddr.String())
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	if err := nc.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	rc := &rawConn{t: t, nc: nc}
+	return rc, func() replay.Result {
+		t.Helper()
+		_ = nc.Close()
+		wg.Wait()
+		if runErr != nil {
+			t.Errorf("Run: %v", runErr)
+		}
+		return res
+	}
+}
+
+func (rc *rawConn) send(b []byte) {
+	rc.t.Helper()
+	if _, err := rc.nc.Write(b); err != nil {
+		rc.t.Fatalf("write: %v", err)
+	}
+}
+
+// expect reads len(want) bytes and checks they are want.
+func (rc *rawConn) expect(want []byte) {
+	rc.t.Helper()
+	got := make([]byte, len(want))
+	if _, err := io.ReadFull(rc.nc, got); err != nil {
+		rc.t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		rc.t.Fatalf("got % x, want % x", got, want)
+	}
 }

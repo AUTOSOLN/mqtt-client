@@ -1,6 +1,6 @@
 # Packet capture replay: plan
 
-Status: draft · 2026-11-17 · phase 0 and phase 1a implemented (see [Phase 0 outcome](#phase-0-outcome) and [Phase 1 outcome](#phase-1-outcome))
+Status: draft · 2026-11-17 · phases 0, 1a and 1b implemented (see [Phase 0 outcome](#phase-0-outcome) and [Phase 1 outcome](#phase-1-outcome))
 
 ## Goal
 
@@ -197,6 +197,11 @@ func (r *Replayer) Dial(ctx context.Context, network, address string) (net.Conn,
 // Run serves timelines handed over by Dial, in order, until every timeline
 // is replayed or ctx is cancelled.
 func (r *Replayer) Run(ctx context.Context) (Result, error)
+
+// Played is closed once the last timeline has been played to its end, or
+// Run has returned. A tool replaying a capture waits on it to know when to
+// stop.
+func (r *Replayer) Played() <-chan struct{}
 ```
 
 `mqttclient.Properties` is already an alias of the comqtt `packets.Properties`, so `replay` decodes properties with comqtt and exposes them without a new type. `Type` is a plain byte, and `replay` defines the spec's 15 type values as its own constants (`replay.Connect` ... `replay.Auth`), so its API doesn't commit to comqtt's. `Packet.TypeName()` gives the spec name for messages.
@@ -700,4 +705,14 @@ Implemented on 2026-11-17. `capture.Read` now reads everything in [Capture sourc
 Real fixtures: this machine can't capture packets (tcpdump has no capture capability and sudo needs a password), so `capture/testdata/record.sh` records them instead. It needs your sudo password for tcpdump. It records `any.pcap`, `any-sll2.pcap`, `lo-nano.pcap` and `lo-nano.pcap.gz`. dumpcap isn't installed, so `dumpcap-2if.pcapng` and the Windows fixture have manual instructions in `capture/testdata/README.md`. `TestRead_RealFixtures` skips each missing file with those instructions. The checker the fixtures go through is itself tested on a built copy of the same exchange.
 
 The 4 MiB pending limit is tested in an internal test with a smaller limit, because pushing 4 MiB through a capture file took 170 ms under `-race`.
+
+### 1b: replay
+
+Implemented on 2026-11-17:
+
+- **QoS 2** in both directions: broker PUBLISH, PUBREC, PUBREL, PUBCOMP to a subscriber, and the client's own QoS 2 PUBLISH with its identifiers mapped. `Inbound` QoS 2 is now tested end to end.
+- **Reconnect sequences:** under `Client.Run`, a captured broker close ends the connection and the next `Dial` gets the next timeline. The test resends an unacknowledged QoS 1 PUBLISH with DUP set on the second connection.
+- **Divergences:** PUBLISH comparison now includes DUP, so a resend without DUP is caught. Tests cover a live PUBLISH that differs field by field, a broker acknowledgement for an identifier the live client never sent (sent unchanged and reported), and a live PINGREQ answered at once.
+- **Mid-session captures:** `replay.New` refuses a timeline that doesn't start with the client's CONNECT, saying why. The timeline can still be decoded and read.
+- **For the CLI:** `Replayer.Played` is closed once the last timeline has been played, and `Result.Replayed` counts the timelines a live client connected for.
 

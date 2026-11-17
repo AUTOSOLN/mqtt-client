@@ -52,7 +52,17 @@ func TestDecode_HostSession_DecodesHeadersAndPayloads(t *testing.T) {
 }
 
 func TestDecode_SegmentsSplitAtEveryOffset_SamePackets(t *testing.T) {
-	conn := hostSession(t)
+	// One packet of every type the host session has, with short payloads
+	// to keep the number of splits small.
+	s := newSession(t, hostAddr, brokerAddr)
+	s.client(packets.Packet{FixedHeader: fh(packets.Connect), Connect: packets.ConnectParams{ClientIdentifier: "c", Clean: true}})
+	s.server(packets.Packet{FixedHeader: fh(packets.Connack)})
+	s.client(packets.Packet{FixedHeader: fh(packets.Subscribe), PacketID: 1, Filters: packets.Subscriptions{{Filter: "t/#", Qos: 1}}})
+	s.server(packets.Packet{FixedHeader: fh(packets.Suback), PacketID: 1, ReasonCodes: []byte{1}})
+	s.server(publishPk("t/a", 1, 2, []byte("payload")))
+	s.client(packets.Packet{FixedHeader: fh(packets.Puback), PacketID: 2})
+	s.client(packets.Packet{FixedHeader: fh(packets.Disconnect)})
+	conn := s.clientClose().conn
 	base := decode(t, conn)
 	for si, s := range conn.Segments {
 		for k := 1; k < len(s.Data); k++ {

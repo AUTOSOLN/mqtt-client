@@ -41,6 +41,7 @@ func (d Divergence) String() string {
 
 // Result is what a replay found.
 type Result struct {
+	Replayed    int // timelines a live client connected for
 	Divergences []Divergence
 }
 
@@ -67,18 +68,22 @@ type Result struct {
 //     close waits for the live client to close.
 //   - At the end of a timeline without a close, the Replayer keeps
 //     answering until the live client disconnects, so the caller decides
-//     when the run ends.
+//     when the run ends; Played tells it when.
 type Replayer struct {
 	timelines []Timeline
 	conns     chan net.Conn // server ends of pipes, from Dial to Run
 	done      chan struct{} // closed when Run returns
+	played    chan struct{} // see Played
+	playOnce  sync.Once
 
 	mu      sync.Mutex
 	running bool
 }
 
 // New returns a Replayer for timelines, which are replayed in order, one
-// per Dial.
+// per Dial. Each timeline must start with the client's CONNECT (Auto or
+// captured): a capture that begins in the middle of a session can be
+// decoded and read, but not replayed.
 func New(timelines []Timeline) (*Replayer, error) {
 	for i, tl := range timelines {
 		switch tl.Version {
@@ -86,9 +91,20 @@ func New(timelines []Timeline) (*Replayer, error) {
 		default:
 			return nil, fmt.Errorf("replay: timeline %d has protocol version %d", i, tl.Version)
 		}
+		if j := slices.IndexFunc(tl.Packets, func(p Packet) bool { return p.Dir == capture.FromClient && !p.Close }); j < 0 || tl.Packets[j].Type != Connect {
+			return nil, fmt.Errorf("replay: timeline %d doesn't start with the client's CONNECT; a capture taken in the middle of a session can't be replayed", i)
+		}
 	}
-	return &Replayer{timelines: timelines, conns: make(chan net.Conn), done: make(chan struct{})}, nil
+	return &Replayer{timelines: timelines, conns: make(chan net.Conn), done: make(chan struct{}), played: make(chan struct{})}, nil
 }
+
+// Played is closed once the last timeline has been played to its end (the
+// live client may still be sending acknowledgements, and the Replayer
+// keeps answering until it disconnects), or Run has returned. A tool
+// replaying a capture waits on it to know when to stop.
+func (r *Replayer) Played() <-chan struct{} { return r.played }
+
+func (r *Replayer) markPlayed() { r.playOnce.Do(func() { close(r.played) }) }
 
 // Dial has the signature of Server.Dial. Each call hands a new in-memory
 // connection to Run, which serves the next timeline on it, and returns the
@@ -121,6 +137,7 @@ func (r *Replayer) Run(ctx context.Context) (Result, error) {
 	r.running = true
 	r.mu.Unlock()
 	defer close(r.done)
+	defer r.markPlayed()
 
 	var res Result
 	for i := range r.timelines {
@@ -130,8 +147,12 @@ func (r *Replayer) Run(ctx context.Context) (Result, error) {
 		case <-ctx.Done():
 			return res, ctx.Err()
 		}
+		res.Replayed++
 		s := &session{tl: &r.timelines[i], conn: i, nc: nc, res: &res,
 			idMap: make(map[uint16]uint16), want: make(map[uint16]byte)}
+		if i == len(r.timelines)-1 {
+			s.played = r.markPlayed
+		}
 		s.serve(ctx)
 		if err := ctx.Err(); err != nil {
 			return res, err
@@ -151,6 +172,8 @@ type session struct {
 	idMap map[uint16]uint16 // captured identifier of a client request -> live identifier
 	want  map[uint16]byte   // identifier of a broker PUBLISH -> the client acknowledgement still expected
 	last  map[byte]Packet   // the latest live CONNECT, SUBSCRIBE and UNSUBSCRIBE, for Auto answers
+
+	played func() // called when the timeline has been played, for the last timeline; nil otherwise
 }
 
 // liveEvent is a packet from the live client, or the error that ended its
@@ -184,6 +207,9 @@ func (s *session) serve(ctx context.Context) {
 		if !s.step(i, p) {
 			return
 		}
+	}
+	if s.played != nil {
+		s.played()
 	}
 	s.drain(-1)
 }
@@ -366,9 +392,9 @@ func (s *session) compare(i int, want, live Packet) bool {
 			s.diverge(i, "Will %s, capture has %s", willTopic(l.Will), willTopic(c.Will))
 		}
 	case Publish:
-		if want.Topic != live.Topic || want.QoS != live.QoS || want.Retain != live.Retain || len(want.Payload) != len(live.Payload) {
-			s.diverge(i, "PUBLISH %q QoS %d retain %v with %d bytes, capture has %q QoS %d retain %v with %d bytes",
-				live.Topic, live.QoS, live.Retain, len(live.Payload), want.Topic, want.QoS, want.Retain, len(want.Payload))
+		if want.Topic != live.Topic || want.QoS != live.QoS || want.Retain != live.Retain || want.Dup != live.Dup || len(want.Payload) != len(live.Payload) {
+			s.diverge(i, "PUBLISH %q QoS %d retain %v dup %v with %d bytes, capture has %q QoS %d retain %v dup %v with %d bytes",
+				live.Topic, live.QoS, live.Retain, live.Dup, len(live.Payload), want.Topic, want.QoS, want.Retain, want.Dup, len(want.Payload))
 		}
 	case Subscribe, Unsubscribe:
 		if !slices.Equal(want.Filters, live.Filters) {
